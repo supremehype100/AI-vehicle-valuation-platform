@@ -95,37 +95,6 @@ def extract_description_flags(description: str | None) -> dict[str, int]:
 # Bucketing helpers
 # ---------------------------------------------------------------------------
 
-def age_bucket(year: int | None) -> str:
-    if year is None:
-        return "unknown"
-    age = 2025 - year
-    if age <= 2:
-        return "0-2"
-    elif age <= 5:
-        return "3-5"
-    elif age <= 10:
-        return "6-10"
-    elif age <= 15:
-        return "11-15"
-    else:
-        return "15+"
-
-
-def mileage_bucket(mileage: int | None) -> str:
-    if mileage is None:
-        return "unknown"
-    if mileage < 20_000:
-        return "0-20k"
-    elif mileage < 50_000:
-        return "20-50k"
-    elif mileage < 100_000:
-        return "50-100k"
-    elif mileage < 150_000:
-        return "100-150k"
-    else:
-        return "150k+"
-
-
 # ---------------------------------------------------------------------------
 # Build feature DataFrame from DB listings
 # ---------------------------------------------------------------------------
@@ -155,8 +124,6 @@ def listings_to_dataframe(listings) -> pd.DataFrame:
             # Transmission: structured attribute first, then description scan
             "transmission": extract_transmission(l.description, rj.get("transmission")),
 
-            "age_bucket": age_bucket(l.year),
-            "mileage_bucket": mileage_bucket(l.mileage),
             **desc_flags,
         }
         rows.append(row)
@@ -191,7 +158,6 @@ def prepare_features(df: pd.DataFrame, label_encoders: dict | None = None, fit: 
     CAT_COLS = [
         "make", "model", "trim", "seller_type",
         "body_type", "drivetrain", "fuel_type", "transmission",
-        "age_bucket", "mileage_bucket",
     ]
 
     if label_encoders is None:

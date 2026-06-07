@@ -10,7 +10,7 @@ class RawListing(BaseModel):
     source_id: str
     url: str | None = None
     vin: str | None = None
-    fingerprint: str | None = None      # hash of (year, make, model, mileage_bucket, city)
+    fingerprint: str | None = None      # hash of (year, make, model, city)
 
     # --- Vehicle ---
     title: str | None = None

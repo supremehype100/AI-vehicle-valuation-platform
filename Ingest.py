@@ -140,3 +140,49 @@ def get_known_ids(source: str, session: Session) -> set[str]:
         select(Listing.source_id).where(Listing.source == source)
     ).scalars().all()
     return set(rows)
+
+
+def sold_sweep(source: str, seen_ids: set[str], session: Session) -> dict:
+    """
+    After a full scrape pass, mark any active listing that wasn't seen as removed.
+    Records days_on_market at time of removal — this becomes your sell-time data.
+
+    Call this after scraping ALL pages for a source, not after a quick page-1 scrape.
+
+    Returns counters: {"removed": n}
+    """
+    now = utcnow()
+
+    # Find all active listings for this source not in the current scrape
+    active_listings = session.execute(
+        select(Listing).where(
+            Listing.source == source,
+            Listing.status == "active",
+        )
+    ).scalars().all()
+
+    removed = 0
+    for listing in active_listings:
+        if listing.source_id not in seen_ids:
+            # Listing disappeared — mark removed
+            days = (now - listing.first_seen.replace(tzinfo=timezone.utc)).days
+            listing.status = "removed"
+            listing.last_seen = now
+            listing.days_on_market = days
+
+            # Snapshot records the terminal state + sell time
+            session.add(ListingSnapshot(
+                listing_id=listing.id,
+                source=listing.source,
+                source_id=listing.source_id,
+                scraped_at=now,
+                price=listing.price,
+                status="removed",
+                mileage=listing.mileage,
+                description=f"removed after {days} days on market",
+            ))
+            removed += 1
+
+    session.commit()
+    logger.info("Sold sweep for %s: %d listings marked removed", source, removed)
+    return {"removed": removed}

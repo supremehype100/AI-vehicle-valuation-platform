@@ -25,7 +25,7 @@ def cmd_scrape(max_pages: int = 5, bulk: bool = False):
     from Session import create_tables, get_session
     from Ingest import upsert_batch, get_known_ids
     from kijiji import run as kijiji_run
-    from Autotrader import run as autotrader_run  # ← add
+    from Autotrader import run as autotrader_run
 
     create_tables()
 
@@ -34,30 +34,52 @@ def cmd_scrape(max_pages: int = 5, bulk: bool = False):
         known_autotrader = set() if bulk else get_known_ids("autotrader", session)
 
     # Kijiji
-    listings = list(kijiji_run(max_pages=max_pages, known_ids=known_kijiji))
-    logger.info("Scraped %d listings from Kijiji", len(listings))
+    kijiji_listings = list(kijiji_run(max_pages=max_pages, known_ids=known_kijiji))
+    logger.info("Scraped %d listings from Kijiji", len(kijiji_listings))
     with get_session() as session:
-        counters = upsert_batch(listings, session)
-    print(f"\nKijiji — New: {counters['new']} | Updated: {counters['updated']} | Errors: {counters['errors']}")
+        kc = upsert_batch(kijiji_listings, session)
+    print(f"\nKijiji    — New: {kc['new']} | Updated: {kc['updated']} | Errors: {kc['errors']}")
 
     # AutoTrader
-    at_listings = list(autotrader_run(max_pages=max_pages, known_ids=known_autotrader))  # ← add
+    at_listings = list(autotrader_run(max_pages=max_pages, known_ids=known_autotrader))
     logger.info("Scraped %d listings from AutoTrader", len(at_listings))
     with get_session() as session:
-        at_counters = upsert_batch(at_listings, session)
-    print(f"AutoTrader — New: {at_counters['new']} | Updated: {at_counters['updated']} | Errors: {at_counters['errors']}")
+        ac = upsert_batch(at_listings, session)
+    print(f"AutoTrader — New: {ac['new']} | Updated: {ac['updated']} | Errors: {ac['errors']}")
+
+
+def cmd_bulk():
+    cmd_scrape(max_pages=100, bulk=True)
+
+
+def cmd_sold_sweep():
+    from Session import get_session
+    from Ingest import sold_sweep, get_known_ids
+    from kijiji import run as kijiji_run
+    from Autotrader import run as autotrader_run
+
+    logger.info("Running sold sweep...")
+
+    # Scrape all pages to get current live IDs
+    kijiji_seen = {l["source_id"] for l in kijiji_run(max_pages=100)}
+    at_seen = {l["source_id"] for l in autotrader_run(max_pages=100)}
+
+    with get_session() as session:
+        kc = sold_sweep("kijiji", kijiji_seen, session)
+        ac = sold_sweep("autotrader", at_seen, session)
+
+    print(f"\nSold sweep complete:")
+    print(f"  Kijiji removed:    {kc['removed']}")
+    print(f"  AutoTrader removed: {ac['removed']}")
+
+
 def cmd_train():
     from Session import get_session
     from Model import train
-    import os
-
-    cv_path = "vehicles_cleaned.csv" if os.path.exists("vehicles_cleaned.csv") else None
-    if cv_path:
-        print("Using personal CSV as validation set")
 
     with get_session() as session:
         try:
-            meta = train(session, cv_csv_path=cv_path)
+            meta = train(session)
         except ValueError as e:
             print(f"\n{e}")
             return
@@ -67,6 +89,7 @@ def cmd_train():
     print(f"  MAE:           ${meta['mae']:,.0f}")
     print(f"  R²:            {meta['r2']}")
     print(f"  Median error:  {meta['median_pct_error']}%")
+
 
 def cmd_value():
     from Session import get_session
@@ -141,12 +164,13 @@ def cmd_pipeline(max_pages: int = 5):
 
 
 COMMANDS = {
-    "scrape":   cmd_scrape,
-    "bulk":     lambda: cmd_scrape(max_pages=100, bulk=True),  # ← add
-    "train":    cmd_train,
-    "value":    cmd_value,
-    "pipeline": cmd_pipeline,
-    "status":   cmd_status,
+    "scrape":      cmd_scrape,
+    "bulk":        cmd_bulk,
+    "sold_sweep":  cmd_sold_sweep,
+    "train":       cmd_train,
+    "value":       cmd_value,
+    "pipeline":    cmd_pipeline,
+    "status":      cmd_status,
 }
 
 if __name__ == "__main__":
@@ -156,7 +180,6 @@ if __name__ == "__main__":
         print(f"Available: {', '.join(COMMANDS)}")
         sys.exit(1)
 
-    # Allow passing max_pages as second arg for scrape/pipeline
     if cmd in ("scrape", "pipeline") and len(sys.argv) > 2:
         COMMANDS[cmd](max_pages=int(sys.argv[2]))
     else:

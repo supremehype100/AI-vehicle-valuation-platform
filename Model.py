@@ -31,7 +31,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
-from Features import load_training_data, prepare_features, extract_description_flags, age_bucket, mileage_bucket, extract_transmission
+from Features import load_training_data, prepare_features, extract_description_flags, extract_transmission
 from models import Listing, PricePrediction
 
 def _load_csv_for_validation(csv_path: str) -> pd.DataFrame:
@@ -65,8 +65,6 @@ def _load_csv_for_validation(csv_path: str) -> pd.DataFrame:
             "drivetrain": "unknown",
             "fuel_type": "unknown",
             "transmission": extract_transmission(desc),
-            "age_bucket": age_bucket(year),
-            "mileage_bucket": mileage_bucket(mileage),
             **desc_flags,
         })
 
@@ -223,8 +221,6 @@ def valuate(
         "drivetrain": (drivetrain or "unknown").lower().strip(),
         "fuel_type": (fuel_type or "unknown").lower().strip(),
         "transmission": "unknown",
-        "age_bucket": age_bucket(year),
-        "mileage_bucket": mileage_bucket(mileage),
         **desc_flags,
     }
 
