@@ -1,0 +1,23 @@
+# --- existing runtime deps (already in use) ---
+pydantic>=2.7
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+pandas>=2.2
+numpy>=1.26
+python-dateutil>=2.9
+httpx>=0.27
+beautifulsoup4>=4.12
+lxml>=5.2
+playwright>=1.44
+xgboost>=2.0
+scikit-learn>=1.4
+
+# --- added for condition extraction / AI pipeline ---
+Pillow>=10.3          # image validation/resize before sending to Ollama
+
+# --- added for evaluation / reporting ---
+matplotlib>=3.8
+
+# --- dev / test ---
+pytest>=8.0
+PyYAML>=6.0    # tests/test_docker_compose.py validates docker-compose.yml
