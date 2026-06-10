@@ -2,8 +2,10 @@
 run.py — Main entry point.
 
 Commands:
-    python run.py scrape        — scrape Kijiji and store to DB
-    python run.py train         — train the price model on stored data
+    python run.py scrape        — scrape Kijiji, AutoTrader, Facebook
+    python run.py bulk          — scrape all pages from all sources
+    python run.py sold_sweep    — mark removed listings
+    python run.py train         — train the price model
     python run.py value         — interactive valuation prompt
     python run.py pipeline      — scrape + train in one shot
     python run.py status        — show DB stats
@@ -12,7 +14,6 @@ Commands:
 from __future__ import annotations
 import sys
 import logging
-import json
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,24 +22,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def get_fb_dealer_ids(session) -> set[str]:
+    from sqlalchemy import text
+    rows = session.execute(text("""
+        SELECT seller_id FROM listings
+        WHERE source = 'facebook'
+        AND seller_id IS NOT NULL
+        AND status = 'active'
+        AND make IS NOT NULL
+        GROUP BY seller_id
+        HAVING COUNT(DISTINCT source_id) >= 2
+    """)).fetchall()
+    return {r[0] for r in rows}
+
+
 def cmd_scrape(max_pages: int = 5, bulk: bool = False):
     from Session import create_tables, get_session
     from Ingest import upsert_batch, get_known_ids
     from kijiji import run as kijiji_run
     from Autotrader import run as autotrader_run
+    from Facebook import run as facebook_run
 
     create_tables()
 
     with get_session() as session:
         known_kijiji = set() if bulk else get_known_ids("kijiji", session)
         known_autotrader = set() if bulk else get_known_ids("autotrader", session)
+        known_facebook = set() if bulk else get_known_ids("facebook", session)
+        dealer_ids = get_fb_dealer_ids(session)
 
     # Kijiji
     kijiji_listings = list(kijiji_run(max_pages=max_pages, known_ids=known_kijiji))
     logger.info("Scraped %d listings from Kijiji", len(kijiji_listings))
     with get_session() as session:
         kc = upsert_batch(kijiji_listings, session)
-    print(f"\nKijiji    — New: {kc['new']} | Updated: {kc['updated']} | Errors: {kc['errors']}")
+    print(f"\nKijiji     — New: {kc['new']} | Updated: {kc['updated']} | Errors: {kc['errors']}")
 
     # AutoTrader
     at_listings = list(autotrader_run(max_pages=max_pages, known_ids=known_autotrader))
@@ -47,6 +65,16 @@ def cmd_scrape(max_pages: int = 5, bulk: bool = False):
         ac = upsert_batch(at_listings, session)
     print(f"AutoTrader — New: {ac['new']} | Updated: {ac['updated']} | Errors: {ac['errors']}")
 
+    # Facebook
+    fb_listings = list(facebook_run(
+        known_ids=known_facebook,
+        dealer_ids=dealer_ids,
+    ))
+    logger.info("Scraped %d listings from Facebook", len(fb_listings))
+    with get_session() as session:
+        fc = upsert_batch(fb_listings, session)
+    print(f"Facebook   — New: {fc['new']} | Updated: {fc['updated']} | Errors: {fc['errors']}")
+
 
 def cmd_bulk():
     cmd_scrape(max_pages=100, bulk=True)
@@ -54,13 +82,12 @@ def cmd_bulk():
 
 def cmd_sold_sweep():
     from Session import get_session
-    from Ingest import sold_sweep, get_known_ids
+    from Ingest import sold_sweep
     from kijiji import run as kijiji_run
     from Autotrader import run as autotrader_run
 
     logger.info("Running sold sweep...")
 
-    # Scrape all pages to get current live IDs
     kijiji_seen = {l["source_id"] for l in kijiji_run(max_pages=100)}
     at_seen = {l["source_id"] for l in autotrader_run(max_pages=100)}
 
@@ -69,17 +96,22 @@ def cmd_sold_sweep():
         ac = sold_sweep("autotrader", at_seen, session)
 
     print(f"\nSold sweep complete:")
-    print(f"  Kijiji removed:    {kc['removed']}")
+    print(f"  Kijiji removed:     {kc['removed']}")
     print(f"  AutoTrader removed: {ac['removed']}")
 
 
 def cmd_train():
     from Session import get_session
     from Model import train
+    import os
+
+    cv_path = "vehicles_cleaned.csv" if os.path.exists("vehicles_cleaned.csv") else None
+    if cv_path:
+        print("Using personal CSV as validation set")
 
     with get_session() as session:
         try:
-            meta = train(session)
+            meta = train(session, cv_csv_path=cv_path)
         except ValueError as e:
             print(f"\n{e}")
             return
@@ -143,6 +175,10 @@ def cmd_status():
         with_price = session.execute(text("SELECT COUNT(*) FROM listings WHERE price IS NOT NULL")).scalar()
         with_make = session.execute(text("SELECT COUNT(*) FROM listings WHERE make IS NOT NULL")).scalar()
         snapshots = session.execute(text("SELECT COUNT(*) FROM listing_snapshots")).scalar()
+        sources = session.execute(text(
+            "SELECT source, COUNT(*) as n FROM listings "
+            "GROUP BY source ORDER BY n DESC"
+        )).fetchall()
         makes = session.execute(text(
             "SELECT make, COUNT(*) as n FROM listings WHERE make IS NOT NULL "
             "GROUP BY make ORDER BY n DESC LIMIT 10"
@@ -153,6 +189,9 @@ def cmd_status():
     print(f"  With price:         {with_price:,}")
     print(f"  With make/model:    {with_make:,}")
     print(f"  Snapshots:          {snapshots:,}")
+    print(f"\nBy source:")
+    for source, count in sources:
+        print(f"  {source:<20} {count:>6}")
     print(f"\nTop makes:")
     for make, count in makes:
         print(f"  {make:<20} {count:>5}")
@@ -180,7 +219,7 @@ if __name__ == "__main__":
         print(f"Available: {', '.join(COMMANDS)}")
         sys.exit(1)
 
-    if cmd in ("scrape", "pipeline") and len(sys.argv) > 2:
+    if cmd in ("scrape", "pipeline", "bulk") and len(sys.argv) > 2:
         COMMANDS[cmd](max_pages=int(sys.argv[2]))
     else:
         COMMANDS[cmd]()

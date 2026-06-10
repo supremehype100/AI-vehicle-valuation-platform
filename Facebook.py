@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import random
 import sys
@@ -22,6 +23,106 @@ DISCOVERED_LISTING_IDS = set()
 
 import re
 
+VIN_RE = re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b')
+
+DEALER_NAME_RE = re.compile(
+    r'\b(auto|motors|cars|dealership|sales|group|ltd|inc|corp|'
+    r'center|centre|imports|wholesale|leasing)\b',
+    re.IGNORECASE
+)
+
+DEALER_DESC_RE = re.compile(
+    r'financing available|warranty included|hst not included|'
+    r'tax not included|certified pre.owned|cpo|contact dealer|'
+    r'test drive|our lot|visit us',
+    re.IGNORECASE
+)
+
+
+def _is_dealer(seller_name: str | None, description: str | None) -> bool:
+    if seller_name and DEALER_NAME_RE.search(seller_name):
+        return True
+    if description and DEALER_DESC_RE.search(description):
+        return True
+    return False
+
+
+def _extract_vin(text: str | None) -> str | None:
+    if not text:
+        return None
+    m = VIN_RE.search(str(text).upper())
+    return m.group(0) if m else None
+
+
+def _make_fingerprint(year, make, model, mileage, city) -> str | None:
+    if not all([year, make, model]):
+        return None
+    bucket = round((mileage or 0) / 500) * 500
+    key = f"{year}:{str(make).lower()}:{str(model).lower()}:{bucket}:{str(city or '').lower()}"
+    return hashlib.md5(key.encode()).hexdigest()
+
+def normalize_visible(extracted: dict, listing_id: str) -> dict | None:
+    # Parse price — "$12,500" → 12500.0
+    price_str = extracted.get("price", "")
+    try:
+        price = float(re.sub(r'[^\d.]', '', price_str)) if price_str else None
+        price = price if price and price > 0 else None
+    except ValueError:
+        price = None
+
+    # Parse mileage — "120,000 km" → 120000
+    mileage_str = extracted.get("mileage", "")
+    try:
+        mileage = int(re.sub(r'\D', '', mileage_str)) if mileage_str else None
+    except ValueError:
+        mileage = None
+
+    title = extracted.get("title", "")
+    description = extracted.get("description", "")
+    seller_name = extracted.get("seller_name", "")
+
+    # Skip dealers
+    if _is_dealer(seller_name, description):
+        return None
+
+    # Parse year/make/model from title — "2019 Toyota Camry SE"
+    parts = title.strip().split()
+    try:
+        year = int(parts[0]) if parts and parts[0].isdigit() else None
+    except (ValueError, IndexError):
+        year = None
+    make = parts[1] if len(parts) > 1 else None
+    model = parts[2] if len(parts) > 2 else None
+
+    return {
+        "source": "facebook",
+        "source_id": listing_id,
+        "url": f"https://www.facebook.com/marketplace/item/{listing_id}",
+        "vin": _extract_vin(description),
+        "fingerprint": _make_fingerprint(year, make, model, mileage, extracted.get("location")),
+        "title": title,
+        "make": make,
+        "model": model,
+        "year": year,
+        "mileage": mileage,
+        "trim": None,
+        "color": None,
+        "price": price,
+        "description": description or None,
+        "status": "active",
+        "seller_type": "private",
+        "seller_id": None,  # not available from visible scrape
+        "location": extracted.get("location"),
+        "image_urls": [],
+        "raw_json": {
+            "body_type": None,
+            "drivetrain": None,
+            "fuel_type": None,
+            "transmission": None,
+            "seller_name": seller_name,
+        },
+        "posted_at": None,
+    }
 
 async def extract_visible_details(page, listing_id):
     """
@@ -149,6 +250,7 @@ async def extract_visible_details(page, listing_id):
 
     except Exception as e:
         print(f" Robust Landmark layer error on ID {listing_id}: {e}")
+    return extracted_data
 async def run_scraper():
     from playwright.async_api import async_playwright
 
@@ -197,6 +299,60 @@ async def run_scraper():
 
         await context.close()
 
+def run(max_listings: int = 10, known_ids: set[str] | None = None, dealer_ids: set[str] | None = None):
+    known_ids = known_ids or set()
+    dealer_ids = dealer_ids or set()
+
+    results = asyncio.run(_run_and_collect(max_listings))
+    for listing in results:
+        if listing and listing["source_id"] not in known_ids:
+            if listing.get("seller_id") not in dealer_ids:
+                yield listing
+
+
+async def _run_and_collect(max_listings: int) -> list[dict]:
+    from playwright.async_api import async_playwright
+
+    collected = []
+
+    async with async_playwright() as p:
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=str(Path(CHROME_USER_DATA).resolve()),
+            headless=False,  # keep False — FB detects headless easily
+            ignore_default_args=["--enable-automation"],
+            args=["--disable-blink-features=AutomationControlled"],
+            viewport={"width": 1920, "height": 1080},
+            locale="en-CA",
+            timezone_id="America/Edmonton",
+        )
+
+        page = context.pages[0] if context.pages else await context.new_page()
+        await page.goto(TARGET_URL, wait_until="domcontentloaded")
+        await page.wait_for_timeout(5000)
+
+        # Collect listing IDs
+        links = await page.query_selector_all("a[href*='/marketplace/item/']")
+        listing_ids = set()
+        for link in links:
+            href = await link.get_attribute("href")
+            if href:
+                match = re.search(r'/item/(\d+)', href)
+                if match:
+                    listing_ids.add(match.group(1))
+
+        logger.info("Found %d listing IDs", len(listing_ids))
+
+        for listing_id in list(listing_ids)[:max_listings]:
+            extracted = await extract_visible_details(page, listing_id)
+            if extracted:
+                normalized = normalize_visible(extracted, listing_id)
+                if normalized:
+                    collected.append(normalized)
+            await asyncio.sleep(random.uniform(6.0, 10.0))
+
+        await context.close()
+
+    return collected
 
 if __name__ == "__main__":
     asyncio.run(run_scraper())
