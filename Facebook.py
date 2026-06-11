@@ -4,6 +4,7 @@ import logging
 import random
 import sys
 from pathlib import Path
+from Features import is_valid_price
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,7 +61,6 @@ def _make_fingerprint(year, make, model, mileage, city) -> str | None:
     bucket = round((mileage or 0) / 500) * 500
     key = f"{year}:{str(make).lower()}:{str(model).lower()}:{bucket}:{str(city or '').lower()}"
     return hashlib.md5(key.encode()).hexdigest()
-
 def normalize_visible(extracted: dict, listing_id: str) -> dict | None:
     # Parse price — "$12,500" → 12500.0
     price_str = extracted.get("price", "")
@@ -69,7 +69,6 @@ def normalize_visible(extracted: dict, listing_id: str) -> dict | None:
         price = price if price and price > 0 else None
     except ValueError:
         price = None
-
     # Parse mileage — "120,000 km" → 120000
     mileage_str = extracted.get("mileage", "")
     try:
@@ -78,13 +77,16 @@ def normalize_visible(extracted: dict, listing_id: str) -> dict | None:
         mileage = None
 
     title = extracted.get("title", "")
+    if re.search(r'\bparts?\b', title, re.IGNORECASE):
+        return None
     description = extracted.get("description", "")
     seller_name = extracted.get("seller_name", "")
 
     # Skip dealers
     if _is_dealer(seller_name, description):
         return None
-
+    if not is_valid_price(price):
+        return None
     # Parse year/make/model from title — "2019 Toyota Camry SE"
     parts = title.strip().split()
     try:
@@ -93,7 +95,9 @@ def normalize_visible(extracted: dict, listing_id: str) -> dict | None:
         year = None
     make = parts[1] if len(parts) > 1 else None
     model = parts[2] if len(parts) > 2 else None
-
+    if not year and not make:
+        logger.debug("Skipping non-vehicle listing %s: %s", listing_id, title)
+        return None
     return {
         "source": "facebook",
         "source_id": listing_id,
@@ -207,13 +211,19 @@ async def extract_visible_details(page, listing_id):
             if seller_fallback:
                 extracted_data["seller_name"] = seller_fallback.group(1).strip()
 
-        # 5. Description Block Extraction First
+        # 5. Description Block Extraction
         desc_match = re.search(
-            r"Seller's description\n(.*?\n?)(?=Location is approximate|Seller information|Seller details)", page_text,
-            re.DOTALL)
+            r"Seller's description\n(.*?\n?)(?=Location is approximate|Seller information|Seller details)",
+            page_text, re.DOTALL)
         if desc_match:
             extracted_data["description"] = desc_match.group(1).strip()
-
+        else:
+            # No structured description — grab text between Details and Location
+            fallback = re.search(
+                r'Details\n(.*?)(?=Location is approximate|Seller information|Seller details|\Z)',
+                page_text, re.DOTALL)
+            if fallback:
+                extracted_data["description"] = fallback.group(1).strip()
         # 6. Mileage Extraction Priority Stack
         specs_match = re.search(r'Driven\s+([\d,]+\s*(?:km|miles|k))', page_text, re.IGNORECASE)
         strict_desc_match = re.search(r'\b(\d{1,3}[,\s]\d{3}|\d{4,6})\s*(?:km|kms|miles)\b',
@@ -299,7 +309,7 @@ async def run_scraper():
 
         await context.close()
 
-def run(max_listings: int = 10, known_ids: set[str] | None = None, dealer_ids: set[str] | None = None):
+def run(max_listings: int = 50, known_ids: set[str] | None = None, dealer_ids: set[str] | None = None):
     known_ids = known_ids or set()
     dealer_ids = dealer_ids or set()
 

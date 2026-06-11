@@ -29,6 +29,11 @@ def upsert(listing_dict: dict, session: Session) -> str:
     source_id = listing_dict["source_id"]
     now = utcnow()
 
+    if listing_dict.get("make"):
+        listing_dict["make"] = listing_dict["make"].strip().title()
+    if listing_dict.get("model"):
+        listing_dict["model"] = listing_dict["model"].strip().title()
+
     existing = session.execute(
         select(Listing).where(
             Listing.source == source,
@@ -152,6 +157,8 @@ def sold_sweep(source: str, seen_ids: set[str], session: Session) -> dict:
     Returns counters: {"removed": n}
     """
     now = utcnow()
+
+
 
     # Find all active listings for this source not in the current scrape
     active_listings = session.execute(

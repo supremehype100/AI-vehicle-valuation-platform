@@ -19,6 +19,7 @@ import random
 import re
 import time
 from typing import Generator
+from Features import is_valid_price
 
 import httpx
 from bs4 import BeautifulSoup
@@ -174,6 +175,9 @@ def normalize(raw: dict) -> dict | None:
         price = price if price and price > 0 else None
     except ValueError:
         price = None
+
+    if not is_valid_price(price):
+        return None
 
     description = raw.get("description") or ""
     vin = _extract_vin(description)

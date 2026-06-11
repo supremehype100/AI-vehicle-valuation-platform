@@ -25,7 +25,7 @@ import random
 import re
 import time
 from typing import Generator
-
+from Features import is_valid_price
 import httpx
 from bs4 import BeautifulSoup
 
@@ -201,6 +201,8 @@ def normalize(raw: dict) -> dict:
     attrs = _parse_attributes(raw.get("attributes", []))
     location_str = _parse_location(raw.get("location"))
     price = _parse_price(raw.get("price"))
+    if not is_valid_price(price):
+        return None
     description = raw.get("description") or ""
 
     # Core vehicle attributes — canonicalName keys confirmed from live data

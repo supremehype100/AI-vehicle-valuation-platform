@@ -20,7 +20,17 @@ import numpy as np
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
+# features.py
+PLACEHOLDER_PRICES = {1234, 12345, 123456}
 
+def is_valid_price(price: float | None) -> bool:
+    if price is None:
+        return False
+    if price < 1000:
+        return False
+    if price in PLACEHOLDER_PRICES:
+        return False
+    return True
 # ---------------------------------------------------------------------------
 # Transmission extraction
 # Sellers almost always mention "manual" explicitly — silence means automatic
@@ -76,6 +86,7 @@ NEGATIVE_SIGNALS = {
     "leak":           r"\bleak(s|ing)?\b",
     "hail":           r"\bhail\b",
     "misfire":        r"\bmisfire\b",
+    "parts_car": r"for parts( only)?|parts only|selling for parts|parts car|not driveable|non.runner|non runner",
 }
 
 
