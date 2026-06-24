@@ -14,6 +14,7 @@ Commands:
 from __future__ import annotations
 import sys
 import logging
+import time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,7 +35,22 @@ def get_fb_dealer_ids(session) -> set[str]:
         HAVING COUNT(DISTINCT source_id) >= 2
     """)).fetchall()
     return {r[0] for r in rows}
+FB_TARGET_URLS = [
+        "https://www.facebook.com/marketplace/calgary/search?topLevelVehicleType=car_truck&query=Vehicles&category_id=546583916084032&exact=false&referral_ui_component=category_menu_item",  # Cars/Trucks
+        "https://www.facebook.com/marketplace/?ref=app_tab",
+        "https://www.facebook.com/marketplace/calgary/search?availability=in%20stock&query=cars&exact=false",
+        "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=cars&exact=false",
+        "https://www.facebook.com/marketplace/calgary/search/?query=toyota",
+        "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=toyota&exact=false",
+        "https://www.facebook.com/marketplace/calgary/search?availability=in%20stock&query=honda&exact=false",
+        "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=honda&exact=false",
+        "https://www.facebook.com/marketplace/calgary/search?availability=in%20stock&query=chevrolet&exact=false",
+        "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=chevrolet&exact=false",
+        "https://www.facebook.com/marketplace/calgary/search?availability=in%20stock&query=suv&exact=false",
+        "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=suv&exact=false",
 
+
+    ]
 
 def cmd_scrape(max_pages: int = 5, bulk: bool = False):
     from Session import create_tables, get_session
@@ -66,20 +82,134 @@ def cmd_scrape(max_pages: int = 5, bulk: bool = False):
     print(f"AutoTrader — New: {ac['new']} | Updated: {ac['updated']} | Errors: {ac['errors']}")
 
     # Facebook
-    fb_listings = list(facebook_run(
-        known_ids=known_facebook,
-        dealer_ids=dealer_ids,
-    ))
-    logger.info("Scraped %d listings from Facebook", len(fb_listings))
+    # ─── DEFINE YOUR TARGET FACEBOOK FEEDS HERE ────────────────────────
+
+    # ──────────────────────────────────────────────────────────────────
+
+    # Facebook Dynamic Multi-URL Scraping Loop
+# Facebook Dynamic Multi-URL Scraping Loop
+    for index, url in enumerate(FB_TARGET_URLS, 1):
+        logger.info(f"Scraping Facebook Feed {index}/{len(FB_TARGET_URLS)}...")
+
+        # Calculate a listing limit based on max_pages, or use your target number (e.g., 7)
+        target_limit = 50  # You can hardcode 7 here, or use: max_pages * 3
+
+        fb_listings = list(facebook_run(
+            known_ids=known_facebook,
+            dealer_ids=dealer_ids,
+            target_url=url,
+            max_listings=target_limit  # ─── FIX: PASS THE LIMIT DOWN!
+        ))
+
+        logger.info("Scraped %d listings from Facebook Feed %d", len(fb_listings), index)
+        with get_session() as session:
+            fc = upsert_batch(fb_listings, session)
+        print(f"Facebook Feed {index} — New: {fc['new']} | Updated: {fc['updated']} | Errors: {fc['errors']}")
+
+        # ─── FACEBOOK INSTRUMENTATION TIMER START ─────────────────────────
+        fb_start_time = time.time()
+        logger.info("Starting Facebook scraping pipeline across all target feeds...")
+
+        total_fb_new = 0
+        total_fb_updated = 0
+        total_fb_errors = 0
+
+        for index, url in enumerate(FB_TARGET_URLS, 1):
+            logger.info(f"Scraping Facebook Feed {index}/{len(FB_TARGET_URLS)}...")
+            target_limit = 50
+
+            try:
+                fb_listings = list(facebook_run(
+                    known_ids=known_facebook,
+                    dealer_ids=dealer_ids,
+                    target_url=url,
+                    max_listings=target_limit
+                ))
+
+                logger.info("Scraped %d listings from Facebook Feed %d", len(fb_listings), index)
+                with get_session() as session:
+                    fc = upsert_batch(fb_listings, session)
+
+                total_fb_new += fc['new']
+                total_fb_updated += fc['updated']
+                total_fb_errors += fc['errors']
+
+                print(f"Facebook Feed {index} — New: {fc['new']} | Updated: {fc['updated']} | Errors: {fc['errors']}")
+
+            except Exception as e:
+                logger.error(f"Critical error on Facebook Feed {index}: {e}")
+                total_fb_errors += 1
+
+        # ─── TIME CALCULATIONS & SAFETY REPORT ───────────────────────────
+        fb_end_time = time.time()
+        elapsed_seconds = fb_end_time - fb_start_time
+        elapsed_minutes = elapsed_seconds / 60
+
+        # Calculate how close you are to your 30-minute boundary
+        remaining_minutes = 30.0 - elapsed_minutes
+        safety_margin_pct = (remaining_minutes / 30.0) * 100
+
+        print(f"\n{'═' * 55}")
+        print(f"  FACEBOOK PIPELINE COMPLETION REPORT")
+        print(f"{'─' * 55}")
+        print(f"  Total Duration:     {elapsed_minutes:.2f} minutes ({int(elapsed_seconds)}s)")
+        print(f"  Next Cycle Buffer:  {remaining_minutes:.2f} minutes left before cron restart")
+        print(f"  Safety Margin:      {safety_margin_pct:.1f}% space remaining")
+        print(f"  Metrics Aggregate:  New: {total_fb_new} | Updated: {total_fb_updated} | Errors: {total_fb_errors}")
+        print(f"{'═' * 55}\n")
+
+        if remaining_minutes <= 5.0:
+            logger.warning(
+                " DANGER ZONE: Facebook scraper is taking more than 25 minutes! It might overlap with the next cron job.")
+        else:
+            logger.info(" SUCCESS: Scraper completed with a healthy safety margin.")
+
+def cmd_scrape_fast(max_pages: int = 1):
+    """Quick scrape — Kijiji + AutoTrader only, no Facebook."""
+    from Session import create_tables, get_session
+    from Ingest import upsert_batch, get_known_ids
+    from kijiji import run as kijiji_run
+    from Autotrader import run as autotrader_run
+
+    create_tables()
+
     with get_session() as session:
-        fc = upsert_batch(fb_listings, session)
-    print(f"Facebook   — New: {fc['new']} | Updated: {fc['updated']} | Errors: {fc['errors']}")
+        known_kijiji = get_known_ids("kijiji", session)
+        known_autotrader = get_known_ids("autotrader", session)
 
+    kijiji_listings = list(kijiji_run(max_pages=max_pages, known_ids=known_kijiji))
+    with get_session() as session:
+        kc = upsert_batch(kijiji_listings, session)
+    print(f"Kijiji     — New: {kc['new']} | Updated: {kc['updated']} | Errors: {kc['errors']}")
 
+    at_listings = list(autotrader_run(max_pages=max_pages, known_ids=known_autotrader))
+    with get_session() as session:
+        ac = upsert_batch(at_listings, session)
+    print(f"AutoTrader — New: {ac['new']} | Updated: {ac['updated']} | Errors: {ac['errors']}")
 def cmd_bulk():
     cmd_scrape(max_pages=100, bulk=True)
 
+def cmd_scrape_facebook(max_listings: int = 7):
+    from Session import create_tables, get_session
+    from Ingest import upsert_batch, get_known_ids
+    from Facebook import run as facebook_run
 
+    create_tables()
+
+    with get_session() as session:
+        known_facebook = get_known_ids("facebook", session)
+        dealer_ids = get_fb_dealer_ids(session)
+
+    for url in FB_TARGET_URLS:
+        fb_listings = list(facebook_run(
+            known_ids=known_facebook,
+            dealer_ids=dealer_ids,
+            max_listings=max_listings,
+            target_url=url,
+        ))
+        with get_session() as session:
+            fc = upsert_batch(fb_listings, session)
+        print(f"Facebook   — New: {fc['new']} | Updated: {fc['updated']} | Errors: {fc['errors']}")
 def cmd_sold_sweep():
     from Session import get_session
     from Ingest import sold_sweep
@@ -197,6 +327,73 @@ def cmd_status():
         print(f"  {make:<20} {count:>5}")
 
 
+def cmd_backfill_descriptions():
+    """Finds existing Kijiji listings with truncated descriptions and updates them."""
+    from Session import get_session
+    from kijiji import fetch_full_description, clean_description
+    from sqlalchemy import text
+    import httpx
+    import time
+    import random
+
+    logger.info("Initializing historical Kijiji description backfill sweep...")
+
+    # 1. Pull only active Kijiji rows where the description cuts off with an ellipsis
+    with get_session() as session:
+        rows = session.execute(text("""
+                                    SELECT source_id, url
+                                    FROM listings
+                                    WHERE source = 'kijiji'
+                                      AND status = 'active'
+                                      AND description LIKE '%...'
+                                    """)).fetchall()
+
+    if not rows:
+        logger.info("No truncated Kijiji listings found. Database is completely up to date!")
+        return
+
+    logger.info(f"Found {len(rows)} legacy listings requiring full description extraction.")
+
+    updated_count = 0
+
+    with httpx.Client(timeout=20) as client:
+        for source_id, url in rows:
+            if not url:
+                continue
+
+            logger.info(f"Deep fetching full text for listing ID: {source_id}...")
+
+            # Use your new helper from your Kijiji file to request the VIP page
+            full_raw_desc = fetch_full_description(url, client)
+
+            if full_raw_desc:
+                # Sanitize the line breaks and bullets
+                cleaned_desc = clean_description(full_raw_desc)
+
+                # 2. Open a precise transaction block to overwrite this specific item
+                with get_session() as session:
+                    session.execute(
+                        text("""
+                             UPDATE listings
+                             SET description = :desc
+                             WHERE source_id = :sid
+                               AND source = 'kijiji'
+                             """),
+                        {"desc": cleaned_desc, "sid": source_id}
+                    )
+                    session.commit()
+
+                updated_count += 1
+                logger.info(f"Successfully backfilled ID {source_id}.")
+            else:
+                logger.warning(f"Could not retrieve full description for ID {source_id} (listing may be gone).")
+
+            # Be nice to Kijiji's firewalls during the backfill process
+            time.sleep(random.uniform(1.5, 3.0))
+
+    print(f"\nSweep complete! Successfully upgraded {updated_count}/{len(rows)} descriptions.")
+
+
 def cmd_pipeline(max_pages: int = 5):
     cmd_scrape(max_pages=max_pages)
     cmd_train()
@@ -210,6 +407,9 @@ COMMANDS = {
     "value":       cmd_value,
     "pipeline":    cmd_pipeline,
     "status":      cmd_status,
+    "scrape_fast": cmd_scrape_fast,
+    "scrape_facebook": cmd_scrape_facebook,
+    "backfill_kijiji": cmd_backfill_descriptions
 }
 
 if __name__ == "__main__":

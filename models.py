@@ -61,7 +61,7 @@ class ListingSnapshot(BaseModel):
 
 
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 import hashlib
@@ -155,4 +155,33 @@ class PricePrediction(Base):
     __table_args__ = (
         UniqueConstraint("listing_id", "model_version", name="uq_prediction_listing_model"),
         Index("ix_prediction_deals", "price_delta_pct"),
+    )
+
+class TrainingRun(Base):
+    __tablename__ = "training_runs"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True
+    )
+
+    trained_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now()
+    )
+
+    training_samples: Mapped[int] = mapped_column(Integer, nullable=False)
+    val_samples: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    mae: Mapped[float] = mapped_column(Float, nullable=False)
+    r2: Mapped[float] = mapped_column(Float, nullable=False)
+    median_pct_error: Mapped[float] = mapped_column(Float, nullable=False)
+
+    model_version: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    used_personal_csv: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False
     )

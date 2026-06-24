@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from Features import load_training_data, prepare_features, extract_description_flags, extract_transmission
-from models import Listing, PricePrediction
+from models import Listing, PricePrediction, TrainingRun
 
 def _load_csv_for_validation(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
@@ -164,6 +164,19 @@ def train(session: Session, cv_csv_path: str | None = None) -> dict:
         "Training complete. MAE=$%.0f | R²=%.3f | Median error=%.1f%%",
         mae, r2, median_pct_err
     )
+    session.add(
+        TrainingRun(
+            training_samples=meta["training_samples"],
+            val_samples=meta["val_samples"],
+            mae=meta["mae"],
+            r2=meta["r2"],
+            median_pct_error=meta["median_pct_error"],
+            model_version=meta["model_version"],
+            used_personal_csv=cv_csv_path is not None,
+        )
+    )
+
+    session.commit()
     return meta
 
 

@@ -146,6 +146,60 @@ def _make_fingerprint(year, make, model, mileage, city) -> str | None:
     return hashlib.md5(key.encode()).hexdigest()
 
 
+def clean_at_description(text: str | None) -> str:
+    """Collapses newlines, clears out bullet points, and flattens prose for NLP processing."""
+    if not text:
+        return ""
+    # Convert carriage returns and multi-line breaks to flat spaces
+    cleaned = text.replace("\r", " ").replace("\n", " ")
+    # Clean out structural artifacts/bullet dash tags that split keywords
+    cleaned = re.sub(r'[-\u2013\u2014*_•]+', ' ', cleaned)
+    # Condense consecutive multiple spacing blocks down to single spaces
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return cleaned.strip()
+
+
+def fetch_at_full_description(listing_url: str, client: httpx.Client) -> str | None:
+    """Visits AutoTrader's individual listing URL to extract the complete un-truncated description."""
+    try:
+        # Re-uses the main file level HEADERS block definition
+        resp = client.get(listing_url, headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        tag = soup.find("script", id="__NEXT_DATA__")
+        if not tag:
+            return None
+
+        page_data = json.loads(tag.string)
+
+        # Navigate the multi-branch hydration tree down to the main listing schema block
+        page_props = page_data.get("props", {}).get("pageProps", {})
+
+        # Priority path 1: Directly inside the targeted snapshot block details
+        listing_details = page_props.get("listingDetails", {})
+        if listing_details and isinstance(listing_details, dict):
+            desc = listing_details.get("description")
+            if desc:
+                return desc
+
+        # Priority path 2: Deep nested alternative layout parameters tree
+        hero_data = (
+            page_props
+            .get("initialData", {})
+            .get("listingHero", {})
+            .get("listingHeroDetails", {})
+        )
+        if hero_data and isinstance(hero_data, dict):
+            desc = hero_data.get("description")
+            if desc:
+                return desc
+
+    except Exception as e:
+        logger.error("Failed executing deep description fetch on AutoTrader VIP %s: %s", listing_url, e)
+    return None
+
 def normalize(raw: dict) -> dict | None:
     source_id = str(raw.get("id") or raw.get("identifier") or "")
     if not source_id:
@@ -273,8 +327,8 @@ def scrape_page(page: int, client: httpx.Client) -> list[dict]:
 
 
 def run(
-    max_pages: int = 5,
-    known_ids: set[str] | None = None,
+        max_pages: int = 5,
+        known_ids: set[str] | None = None,
 ) -> Generator[dict, None, None]:
     known_ids = known_ids or set()
 
@@ -292,9 +346,18 @@ def run(
 
             new_on_page = 0
             for listing in listings:
-                yield listing
+                if listing is None:
+                    continue
+
+                # Zero-Risk Approach: Don't fetch secondary pages.
+                # Just clean out the bad linebreaks and formatting artifacts on the text we have.
                 if listing["source_id"] not in known_ids:
                     new_on_page += 1
+
+                desc = listing.get("description") or ""
+                listing["description"] = clean_at_description(desc)
+
+                yield listing
 
             if new_on_page == 0 and known_ids:
                 logger.info("Page %d fully known — stopping early", page)

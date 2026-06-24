@@ -29,6 +29,50 @@ from Features import is_valid_price
 import httpx
 from bs4 import BeautifulSoup
 
+
+def clean_description(text: str | None) -> str:
+    """Collapses line breaks, breaks up bullets, and outputs clean prose for ML."""
+    if not text:
+        return ""
+    # Convert raw carriage returns and newlines to spaces
+    cleaned = text.replace("\r", " ").replace("\n", " ")
+    # Strip structural artifacts/bullets that cut off words
+    cleaned = re.sub(r'[-\u2013\u2014*_•]+', ' ', cleaned)
+    # Collapse multiple spaces into a single space
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return cleaned.strip()
+
+
+def fetch_full_description(listing_url: str, client: httpx.Client) -> str | None:
+    """Navigates to the listing page to grab the full description from its local Apollo State."""
+    try:
+        # Re-use the master HEADERS from your script
+        resp = client.get(listing_url, headers=HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        tag = soup.find("script", id="__NEXT_DATA__")
+        if not tag:
+            return None
+
+        vip_data = json.loads(tag.string)
+        apollo = (
+            vip_data.get("props", {})
+            .get("pageProps", {})
+            .get("__APOLLO_STATE__", {})
+        )
+
+        # Scan the flat Apollo state dictionary for the listing's full text
+        for key, value in apollo.items():
+            if key.startswith("AutosListing:") and isinstance(value, dict):
+                full_desc = value.get("description")
+                if full_desc:
+                    return full_desc
+
+    except Exception as e:
+        logger.error("Failed to fetch detailed description from VIP %s: %s", listing_url, e)
+    return None
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.kijiji.ca"
@@ -312,20 +356,14 @@ def scrape_page(page: int, client: httpx.Client) -> list[dict]:
         return []
 
     logger.info("Page %d: found %d listings", page, len(raw_listings))
-    return [normalize(r) for r in raw_listings]
+    return [normalize(r) for r in raw_listings if normalize(r) is not None]
 
 
 def run(
-    max_pages: int = 5,
-    known_ids: set[str] | None = None,
+        max_pages: int = 5,
+        known_ids: set[str] | None = None,
 ) -> Generator[dict, None, None]:
-    """
-    Scrape up to max_pages pages of Kijiji vehicle listings.
-
-    known_ids: set of source_ids already in the DB.
-    When we hit a full page of known IDs we stop early — everything
-    older is already stored.
-    """
+    """Scrape up to max_pages pages of Kijiji vehicle listings with deep descriptions."""
     known_ids = known_ids or set()
 
     with httpx.Client(timeout=20) as client:
@@ -335,10 +373,6 @@ def run(
             if not listings:
                 break
 
-            # Sort by sortingDate descending — ensures promoted listings
-            # (which have old dates) don't interfere with the cutoff check.
-            # Kijiji sets sortingDate to the bump/repost time for organic
-            # listings and to an arbitrary future/old time for promoted ones.
             listings.sort(
                 key=lambda x: x.get("raw_json", {}).get("sorting_date") or "",
                 reverse=True,
@@ -346,16 +380,34 @@ def run(
 
             new_on_page = 0
             for listing in listings:
-                yield listing
+                if listing is None:
+                    continue
+
+                # Check if this is a brand new ad we need to process
                 if listing["source_id"] not in known_ids:
                     new_on_page += 1
+                    desc = listing.get("description") or ""
 
-            # Early exit: every organic listing on this page is already known.
+                    # If it's cut off, go deep-fetch it
+                    if desc.endswith("..."):
+                        logger.info("Truncated description found for ID %s. Fetching full text...",
+                                    listing["source_id"])
+                        full_raw_desc = fetch_full_description(listing["url"], client)
+
+                        if full_raw_desc:
+                            listing["description"] = clean_description(full_raw_desc)
+                            listing["raw_json"]["_raw"]["description"] = full_raw_desc
+
+                        # Anti-bot politeness throttling
+                        time.sleep(random.uniform(1.0, 2.0))
+                    else:
+                        # Even if it's short and not cut off, clean it of line-break anomalies anyway
+                        listing["description"] = clean_description(desc)
+
+                yield listing
+
             if new_on_page == 0 and known_ids:
                 logger.info("Page %d fully known — stopping early", page)
                 break
 
-            # Polite delay between pages
             time.sleep(random.uniform(1.0, 2.5))
-
-
