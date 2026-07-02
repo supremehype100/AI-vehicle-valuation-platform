@@ -161,16 +161,21 @@ def prepare_features(df: pd.DataFrame, label_encoders: dict | None = None, fit: 
     for col in CAT_COLS:
         if col not in df.columns:
             df[col] = "unknown"
+
         if fit:
+            # Always include "unknown" in the training vocabulary,
+            # even if it never appears in the training data itself.
             le = LabelEncoder()
-            df[col] = le.fit_transform(df[col].astype(str))
+            values = df[col].astype(str).tolist() + ["unknown"]
+            le.fit(values)
+            df[col] = le.transform(df[col].astype(str))
             label_encoders[col] = le
         else:
             le = label_encoders[col]
             known = set(le.classes_)
             df[col] = df[col].apply(lambda x: x if x in known else "unknown")
-            if "unknown" not in known:
-                le.classes = np.append(le.classes_, "unknown")
             df[col] = le.transform(df[col].astype(str))
 
     return df.values, target.values, label_encoders
+
+

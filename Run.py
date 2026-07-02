@@ -116,6 +116,7 @@ def cmd_scrape(max_pages: int = 5, bulk: bool = False):
 
         for index, url in enumerate(FB_TARGET_URLS, 1):
             logger.info(f"Scraping Facebook Feed {index}/{len(FB_TARGET_URLS)}...")
+
             target_limit = 50
 
             try:
@@ -126,21 +127,17 @@ def cmd_scrape(max_pages: int = 5, bulk: bool = False):
                     max_listings=target_limit
                 ))
 
-                logger.info("Scraped %d listings from Facebook Feed %d", len(fb_listings), index)
                 with get_session() as session:
                     fc = upsert_batch(fb_listings, session)
 
-                total_fb_new += fc['new']
-                total_fb_updated += fc['updated']
-                total_fb_errors += fc['errors']
-
-                print(f"Facebook Feed {index} — New: {fc['new']} | Updated: {fc['updated']} | Errors: {fc['errors']}")
+                total_fb_new += fc["new"]
+                total_fb_updated += fc["updated"]
+                total_fb_errors += fc["errors"]
 
             except Exception as e:
                 logger.error(f"Critical error on Facebook Feed {index}: {e}")
                 total_fb_errors += 1
-
-        # ─── TIME CALCULATIONS & SAFETY REPORT ───────────────────────────
+        #END
         fb_end_time = time.time()
         elapsed_seconds = fb_end_time - fb_start_time
         elapsed_minutes = elapsed_seconds / 60
