@@ -32,7 +32,6 @@ RUN_SCRIPT = "run.py"
 def fast_worker():
     while True:
         start = time.time()
-
         now = datetime.now()
 
         if 8 <= now.hour < 22:
@@ -57,34 +56,89 @@ def facebook_worker():
     while True:
         now = datetime.now()
 
-        if 8 <= now.hour < 22:
-            try:
-                logger.info("Launching Facebook scrape (background)...")
-                subprocess.Popen(
-                    [PYTHON, RUN_SCRIPT, "scrape_facebook"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception as e:
-                logger.exception(f"Facebook launch failed: {e}")
-        else:
-            logger.info("Outside hours, skipping Facebook scrape")
+        # 1. If it's night time, sleep comfortably until 8:00 AM
+        if now.hour < 8 or now.hour >= 22:
+            logger.info("Outside operating hours. Facebook worker going to sleep until 8:00 AM...")
 
-        # sleep 3 hours
-        time.sleep(3* 60 * 60)
+            # Calculate seconds until 8:00 AM
+            target_time = now.replace(hour=8, minute=0, second=0, microsecond=0)
+            if now.hour >= 22:
+                # If it's late at night, target 8am tomorrow
+                from datetime import timedelta
+                target_time += timedelta(days=1)
+
+            sleep_duration = (target_time - now).total_seconds()
+            time.sleep(sleep_duration)
+            continue  # Wake up and re-evaluate
+
+        # 2. If we are in bounds, fire the scraper exactly once
+        try:
+            logger.info("Launching Facebook scrape (background)...")
+            subprocess.Popen(
+                [PYTHON, RUN_SCRIPT, "scrape_facebook"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            logger.exception(f"Facebook launch failed: {e}")
+
+        # 3. CRITICAL: Hard sleep for 3 hours after firing to guarantee zero spamming
+        logger.info("Facebook scrape dispatched. Locking loop for 3 hours...")
+        time.sleep(3 * 60 * 60)
+
+# -----------------------------
+# 3. DAILY MAINTENANCE LOOP (6am & 10pm)
+# -----------------------------
+def maintenance_worker():
+    # Flags to ensure jobs only run ONCE during their target minute
+    bulk_run_today = False
+    train_run_today = False
+    current_day = datetime.now().date()
+
+    while True:
+        now = datetime.now()
+
+        # Reset the daily flags if we roll over to a new day
+        if now.date() != current_day:
+            current_day = now.date()
+            bulk_run_today = False
+            train_run_today = False
+
+        try:
+            # --- 6:00 AM Bulk Sweep ---
+            if now.hour == 6 and now.minute == 0 and not bulk_run_today:
+                logger.info("Running global bulk scrape (including Facebook)...")
+                subprocess.run([PYTHON, RUN_SCRIPT, "bulk"])
+                logger.info("Running sold detection sweep...")
+                subprocess.run([PYTHON, RUN_SCRIPT, "sold_sweep"])
+                bulk_run_today = True
+
+            # --- 10:00 PM Model Retraining ---
+            elif now.hour == 22 and now.minute == 0 and not train_run_today:
+                logger.info("Retraining model...")
+                subprocess.run([PYTHON, RUN_SCRIPT, "train"])
+                train_run_today = True
+
+        except Exception as e:
+            logger.exception(f"Daily maintenance job failed: {e}")
+
+        # Check every 30 seconds so we never miss the 00-minute mark
+        time.sleep(30)
 
 
 # -----------------------------
-# START BOTH WORKERS
+# START ALL WORKERS
 # -----------------------------
 if __name__ == "__main__":
     logger.info("Starting parallel scraper system...")
 
     t1 = threading.Thread(target=fast_worker, daemon=True)
     t2 = threading.Thread(target=facebook_worker, daemon=True)
+    t3 = threading.Thread(target=maintenance_worker, daemon=True)
 
     t1.start()
     t2.start()
+    t3.start()
 
     # keep main thread alive
     while True:

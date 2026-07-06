@@ -67,15 +67,15 @@ def _extract_year_make_model(title: str) -> tuple[int | None, str | None, str | 
     if not title:
         return None, None, None
 
-    # Step 1 — hard-remove Facebook noise FIRST
+    # 1. Hard-remove Facebook noise FIRST (Prefixes and Suffixes)
     title = re.sub(r'^\(\d+\)\s*', '', title)  # removes (2), (10), etc
+    title = re.sub(r'^Marketplace\s*[\s–\-—|•]*', '', title, flags=re.IGNORECASE)  # removes "Marketplace – "
+    title = re.sub(r'[\s–\-—|•]+\s*Facebook.*$', '', title, flags=re.IGNORECASE)  # removes " | Facebook"
+
     title = title.replace("|", " ")
     title = re.sub(r'\s+', " ", title).strip()
 
-    # Clean out explicit platform suffixes trailing behind if any
-    title = re.sub(r'\bFacebook\b.*$', '', title, flags=re.IGNORECASE).strip()
-
-    # Extract Year
+    # 2. Extract Year
     year = None
     parts = title.split()
     for part in parts:
@@ -83,7 +83,7 @@ def _extract_year_make_model(title: str) -> tuple[int | None, str | None, str | 
             year = int(part)
             break
 
-    # Detect Make
+    # 3. Detect Make
     detected_make = None
     title_lower = title.lower()
 
@@ -99,7 +99,7 @@ def _extract_year_make_model(title: str) -> tuple[int | None, str | None, str | 
     if not detected_make:
         return year, None, None
 
-    # Step 3 — extract model safely via token filtering
+    # 4. Extract model safely via token filtering
     model_parts = title.split()
 
     # Filter out year and make tokens cleanly
@@ -108,15 +108,14 @@ def _extract_year_make_model(title: str) -> tuple[int | None, str | None, str | 
         if p.lower() != detected_make.lower() and p != str(year)
     ]
 
-    # Join and clean up surrounding punctuation/spaces
+    # Join and clean up any lingering inner/outer punctuation symbols
     model = " ".join(model_parts).strip(" -|—–•.")
 
-    # Trim to a reasonable length if there's leftover title clutter (e.g., trim packages)
+    # Trim to a clean 2-word model (e.g., "Atenza Sport Wagon" -> "Atenza Sport")
     final_parts = model.split()
     model = " ".join(final_parts[:2]) if final_parts else "Unknown"
 
     return year, detected_make, model.title()
-
 
 def parse_raw_listing(extracted: dict) -> dict | None:
     title = extracted.get("title", "")
