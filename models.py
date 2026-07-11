@@ -100,12 +100,58 @@ class Listing(Base):
     image_urls: Mapped[list] = mapped_column(ARRAY(Text), default=list)
     raw_json: Mapped[dict] = mapped_column(JSONB, default=dict)
 
+    # --- Explicit dataset classification (private / dealer / salvage) ---
+    # Do NOT rely on seller_type alone for training-set separation — this is
+    # the field that actually gates which dataset a row belongs to. Defaults
+    # to "private" so pre-existing rows (all scraped from private-only feeds
+    # today) classify correctly without a data backfill being required first;
+    # the migration explicitly sets it from seller_type/source for safety.
+    listing_type: Mapped[str] = mapped_column(String(16), nullable=False, default="private", index=True)
+
+    # --- Salvage-auction-specific fields (nullable; only populated for
+    #     listing_type == "salvage", e.g. rows from the stat.vin scraper) ---
+    damage_primary: Mapped[str | None] = mapped_column(String(64))
+    damage_secondary: Mapped[str | None] = mapped_column(String(64))
+    title_type: Mapped[str | None] = mapped_column(String(64))
+    auction_house: Mapped[str | None] = mapped_column(String(64))
+    auction_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lot_number: Mapped[str | None] = mapped_column(String(64))
+    run_drive_status: Mapped[str | None] = mapped_column(String(32))
+    # "sold" | "unsold" | "pending" — whether `price` is a final hammer price
+    # or an estimate/current bid. Distinct from `status` (active/sold/removed
+    # lifecycle) which already means something else in this codebase.
+    auction_sale_status: Mapped[str | None] = mapped_column(String(16))
+
+    # --- Current best-known condition assessment (mutable, precedence-merged
+    #     from condition_assessments; mirrors how `price`/`status` above are
+    #     the "current" fields while listing_snapshots is the audit trail) ---
+    condition_overall: Mapped[str | None] = mapped_column(String(32))
+    condition_exterior: Mapped[str | None] = mapped_column(String(32))
+    condition_interior: Mapped[str | None] = mapped_column(String(32))
+    condition_mechanical: Mapped[str | None] = mapped_column(String(32))
+    condition_accident_indicated: Mapped[bool | None] = mapped_column(Boolean)
+    condition_rust_indicated: Mapped[bool | None] = mapped_column(Boolean)
+    condition_flood_indicated: Mapped[bool | None] = mapped_column(Boolean)
+    condition_smoke_pet_indicated: Mapped[bool | None] = mapped_column(Boolean)
+    condition_neglect_indicated: Mapped[bool | None] = mapped_column(Boolean)
+    condition_recent_repair_indicated: Mapped[bool | None] = mapped_column(Boolean)
+    condition_undisclosed_issue_flag: Mapped[bool | None] = mapped_column(Boolean)
+    condition_positive_notes: Mapped[str | None] = mapped_column(Text)
+    condition_confidence: Mapped[float | None] = mapped_column(Float)
+    # {field_name: {"source": "manual|structured|ai|inferred", "precedence": int,
+    #   "model_version": str|None, "confidence": float|None, "set_at": iso str,
+    #   "manually_validated": bool}} — per-field provenance, see config.py
+    # PRECEDENCE_* constants for the merge ordering this implements.
+    condition_field_provenance: Mapped[dict] = mapped_column(JSONB, default=dict)
+
     snapshots: Mapped[list[DBListingSnapshot]] = relationship(back_populates="listing", cascade="all, delete-orphan")
     predictions: Mapped[list[PricePrediction]] = relationship(back_populates="listing", cascade="all, delete-orphan")
+    condition_history: Mapped[list["ConditionAssessment"]] = relationship(back_populates="listing", cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint("source", "source_id", name="uq_listing_source_id"),
         Index("ix_listing_make_model_year", "make", "model", "year"),
+        Index("ix_listing_type", "listing_type"),
     )
 
     @staticmethod
@@ -184,4 +230,78 @@ class TrainingRun(Base):
     used_personal_csv: Mapped[bool] = mapped_column(
         Boolean,
         default=False
+    )
+
+
+class ConditionAssessment(Base):
+    """
+    Immutable audit trail of AI condition-extraction runs — insert-only, same
+    pattern as DBListingSnapshot above. `Listing.condition_*` holds the
+    current precedence-merged view; this table holds every attempt that fed
+    into it, so a bad merge or model regression is always recoverable.
+    """
+    __tablename__ = "condition_assessments"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    listing_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("listings.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+
+    model_version: Mapped[str] = mapped_column(String(64), nullable=False)   # e.g. "ollama:qwen2.5vl:7b"
+    schema_version: Mapped[str] = mapped_column(String(16), nullable=False)  # e.g. "condition_v1"
+
+    # Which images were actually sent to the model, and a hash of the
+    # description text used — lets the backfill detect "listing changed since
+    # last assessment" without re-storing the raw payloads.
+    images_used: Mapped[list] = mapped_column(JSONB, default=list)
+    description_hash: Mapped[str | None] = mapped_column(String(64))
+
+    extraction_status: Mapped[str] = mapped_column(String(16), nullable=False, default="success")  # success|failed|partial
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    # Full structured JSON returned by the model for this run — the source of
+    # truth that Listing.condition_* is derived from via precedence merge.
+    raw_extraction: Mapped[dict] = mapped_column(JSONB, default=dict)
+    confidence_overall: Mapped[float | None] = mapped_column(Float)
+
+    listing: Mapped[Listing] = relationship(back_populates="condition_history")
+
+    __table_args__ = (
+        Index("ix_condition_assessment_listing_time", "listing_id", "created_at"),
+    )
+
+
+class ModelArtifact(Base):
+    """
+    Model registry — one row per trained artifact version, across all four
+    pipelines (private_csv / private_traintest / dealer_traintest /
+    salvage_traintest). Lets `training/registry.py` answer "what's the latest
+    version of model X" and "what dataset/config produced it" without
+    grepping the filesystem.
+    """
+    __tablename__ = "model_artifacts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    model_key: Mapped[str] = mapped_column(String(32), nullable=False)   # private_csv|private_traintest|dealer_traintest|salvage_traintest
+    version: Mapped[str] = mapped_column(String(32), nullable=False)     # e.g. "20260812-215500"
+    is_baseline: Mapped[bool] = mapped_column(Boolean, default=False)    # marks the preserved Model A baseline
+
+    artifact_path: Mapped[str] = mapped_column(Text, nullable=False)
+    encoder_path: Mapped[str | None] = mapped_column(Text)
+    meta_path: Mapped[str | None] = mapped_column(Text)
+
+    dataset_listing_type: Mapped[str | None] = mapped_column(String(16))  # private|dealer|salvage|null(=mixed/csv)
+    dataset_row_count: Mapped[int | None] = mapped_column(Integer)
+    dataset_fingerprint: Mapped[str | None] = mapped_column(String(64))   # hash of row ids/version for reproducibility
+    split_strategy: Mapped[str | None] = mapped_column(String(32))        # e.g. "time_aware_vin_grouped" | "personal_csv"
+
+    feature_list: Mapped[list] = mapped_column(JSONB, default=list)
+    model_config: Mapped[dict] = mapped_column(JSONB, default=dict)
+    metrics: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    trained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        UniqueConstraint("model_key", "version", name="uq_model_artifact_key_version"),
+        Index("ix_model_artifact_key_trained", "model_key", "trained_at"),
     )
