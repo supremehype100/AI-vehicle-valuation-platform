@@ -8,7 +8,6 @@ Converts raw listing data into features for the price prediction model.
 
 import re
 import pandas as pd
-import numpy as np
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -128,19 +127,31 @@ def listings_to_dataframe(listings) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def load_training_data(session: Session, min_price: float = 1000, max_price: float = 200_000) -> pd.DataFrame:
+def load_training_data(
+    session: Session,
+    min_price: float = 1000,
+    max_price: float = 200_000,
+    listing_type: str | None = "private",
+) -> pd.DataFrame:
     # ─── FIX 2: MOVED DEFAULT MIN_PRICE TO 1000 ─────────────────────────
     from models import Listing
 
-    listings = session.execute(
-        select(Listing).where(
-            Listing.price >= min_price,
-            Listing.price <= max_price,
-            # Explicitly exclude common placeholder prices straight out of SQL
-            ~Listing.price.in_(PLACEHOLDER_PRICES),
-            Listing.year.isnot(None),
-        )
-    ).scalars().all()
+    # listing_type filter is intentional and load-bearing: without it, dealer
+    # (and, once the salvage scraper exists, salvage) rows silently mix into
+    # what is supposed to be the private-party valuation model. Pass
+    # listing_type=None only for callers that explicitly want the unfiltered
+    # set (e.g. diagnostics) — every training pipeline should pass a value.
+    conditions = [
+        Listing.price >= min_price,
+        Listing.price <= max_price,
+        # Explicitly exclude common placeholder prices straight out of SQL
+        ~Listing.price.in_(PLACEHOLDER_PRICES),
+        Listing.year.isnot(None),
+    ]
+    if listing_type is not None:
+        conditions.append(Listing.listing_type == listing_type)
+
+    listings = session.execute(select(Listing).where(*conditions)).scalars().all()
     return listings_to_dataframe(listings)
 
 
