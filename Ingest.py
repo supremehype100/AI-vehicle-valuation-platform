@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from models import Listing, DBListingSnapshot as ListingSnapshot
+from classification.classify import classify_listing
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def upsert(listing_dict: dict, session: Session) -> str:
     ).scalar_one_or_none()
 
     if existing is None:
-        # Parse posted_at if it's a string
+        # Parse posted_at / auction_date if they're strings
         posted_at = listing_dict.get("posted_at")
         if isinstance(posted_at, str):
             try:
@@ -50,6 +51,15 @@ def upsert(listing_dict: dict, session: Session) -> str:
                 posted_at = dateparser.parse(posted_at)
             except Exception:
                 posted_at = None
+
+        auction_date = listing_dict.get("auction_date")
+        if isinstance(auction_date, str):
+            try:
+                from dateutil import parser as dateparser
+                auction_date = dateparser.parse(auction_date)
+            except Exception:
+                auction_date = None
+        listing_dict = {**listing_dict, "auction_date": auction_date}
 
         row = Listing(
             source=source,
@@ -76,6 +86,15 @@ def upsert(listing_dict: dict, session: Session) -> str:
             seller_type=listing_dict.get("seller_type"),
             seller_id=listing_dict.get("seller_id"),
             location=listing_dict.get("location"),
+            listing_type=listing_dict.get("listing_type") or classify_listing(listing_dict),
+            damage_primary=listing_dict.get("damage_primary"),
+            damage_secondary=listing_dict.get("damage_secondary"),
+            title_type=listing_dict.get("title_type"),
+            auction_house=listing_dict.get("auction_house"),
+            auction_date=listing_dict.get("auction_date"),
+            lot_number=listing_dict.get("lot_number"),
+            run_drive_status=listing_dict.get("run_drive_status"),
+            auction_sale_status=listing_dict.get("auction_sale_status"),
             first_seen=now,
             last_seen=now,
             posted_at=posted_at,
