@@ -6,6 +6,13 @@ import sys
 import re
 from pathlib import Path
 from Features import is_valid_price
+from config import (
+    FB_LISTING_DELAY_MIN_SECONDS,
+    FB_LISTING_DELAY_MAX_SECONDS,
+    FB_PAGE_LOAD_WAIT_MIN_MS,
+    FB_PAGE_LOAD_WAIT_MAX_MS,
+)
+from classification.classify import DEALER_NAME_RE, DEALER_DESC_RE, dealer_match_reason
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,19 +30,6 @@ Path(CHROME_USER_DATA).mkdir(parents=True, exist_ok=True)
 DISCOVERED_LISTING_IDS = set()
 
 VIN_RE = re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b')
-
-DEALER_NAME_RE = re.compile(
-    r'\b(auto|motors|cars|dealership|sales|group|ltd|inc|corp|'
-    r'center|centre|imports|wholesale|leasing)\b',
-    re.IGNORECASE
-)
-
-DEALER_DESC_RE = re.compile(
-    r'financing available|warranty included|hst not included|'
-    r'tax not included|certified pre.owned|cpo|contact dealer|'
-    r'test drive|our lot|visit us',
-    re.IGNORECASE
-)
 
 VALID_MAKES = {
     "Abarth", "Acura", "Alfa Romeo", "Alpine", "Aston Martin", "Audi", "Austin", "Austin-Healey", "AMC", "Autozam",
@@ -56,11 +50,7 @@ SORTED_MAKES = sorted(list(VALID_MAKES), key=len, reverse=True)
 
 
 def _check_dealer_match(seller_name: str | None, description: str | None) -> str | None:
-    if seller_name and DEALER_NAME_RE.search(seller_name):
-        return f"Dealer name pattern matched inside seller name '{seller_name}'"
-    if description and DEALER_DESC_RE.search(description):
-        return "Commercial sales vocabulary found inside description text"
-    return None
+    return dealer_match_reason(seller_name, description)
 
 
 def _extract_year_make_model(title: str) -> tuple[int | None, str | None, str | None]:
@@ -144,10 +134,14 @@ def parse_raw_listing(extracted: dict) -> dict | None:
         logger.info(" Dropped listing ID %s: Title contains parts/salvage keywords ('%s')", listing_id, title)
         return None
 
+    # Dealer listings are no longer discarded here — they're kept and routed
+    # to the dealer dataset (see classification/classify.py + Ingest.py)
+    # instead of being thrown away. We still tag *why* for observability.
     dealer_reason = _check_dealer_match(seller_name, description)
+    seller_type = "dealer" if dealer_reason else "private"
     if dealer_reason:
-        logger.info(" Dropped listing ID %s: Flagged as dealer. Reason: %s", listing_id, dealer_reason)
-        return None
+        logger.info(" Listing ID %s flagged as dealer (kept, routed to dealer dataset). Reason: %s",
+                    listing_id, dealer_reason)
 
     year, make, model = _extract_year_make_model(title)
 
@@ -181,6 +175,7 @@ def parse_raw_listing(extracted: dict) -> dict | None:
         "mileage": mileage,
         "description": description,
         "seller_name": seller_name,
+        "seller_type": seller_type,
         "raw_json": extracted,
         "status": extracted.get("status", "active")
     }
@@ -210,10 +205,9 @@ def normalize_visible(extracted: dict, listing_id: str) -> dict | None:
     description = extracted.get("description", "")
     seller_name = extracted.get("seller_name", "")
 
+    # Dealer listings are kept (routed to the dealer dataset), not dropped.
     dealer_reason = _check_dealer_match(seller_name, description)
-    if dealer_reason:
-        logger.info("❌ normalize_visible skipped ID %s: Commercial dealer flags matched.", listing_id)
-        return None
+    seller_type = "dealer" if dealer_reason else "private"
 
     price_str = extracted.get("price", "")
     try:
@@ -253,7 +247,7 @@ def normalize_visible(extracted: dict, listing_id: str) -> dict | None:
         "price": price,
         "description": description or None,
         "status": extracted.get("status", "active"),
-        "seller_type": "private",
+        "seller_type": seller_type,
         "seller_id": None,
         "location": extracted.get("location"),
         "image_urls": [],
@@ -284,7 +278,9 @@ async def extract_visible_details(page, listing_id):
 
     try:
         await page.goto(url, wait_until="domcontentloaded")
-        await page.wait_for_timeout(random.randint(5000, 7000))
+        # Page-load render wait — a correctness safeguard, not the inter-listing
+        # pause, so it stays at its original value (see config.py).
+        await page.wait_for_timeout(random.randint(FB_PAGE_LOAD_WAIT_MIN_MS, FB_PAGE_LOAD_WAIT_MAX_MS))
 
         try:
             buttons = await page.query_selector_all(
@@ -385,7 +381,12 @@ async def run_scraper(target_url: str | None = None):
             user_data_dir=str(Path(CHROME_USER_DATA).resolve()),
             headless=False,
             ignore_default_args=["--enable-automation"],
-            args=["--disable-blink-features=AutomationControlled"],
+            # ⬇️ TWEAKED ARGS: Added focus prevention flags ⬇️
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-startup-window",  # Spawns window in the background
+                "--inactive"            # Tells the OS not to bring this window to the foreground
+            ],
             viewport={"width": 1920, "height": 1080},
             locale="en-CA",
             timezone_id="America/Edmonton"
@@ -406,7 +407,8 @@ async def run_scraper(target_url: str | None = None):
         target_queue = list(DISCOVERED_LISTING_IDS)[:4]
         for index, item_id in enumerate(target_queue, 1):
             await extract_visible_details(page, item_id)
-            await asyncio.sleep(random.uniform(6.0, 10.0))
+            # Pause between checking listings — configurable, see config.py.
+            await asyncio.sleep(random.uniform(FB_LISTING_DELAY_MIN_SECONDS, FB_LISTING_DELAY_MAX_SECONDS))
 
         await context.close()
 
@@ -434,7 +436,12 @@ async def _run_and_collect(max_listings: int, target_url: str) -> list[dict]:
             user_data_dir=str(Path(CHROME_USER_DATA).resolve()),
             headless=False,
             ignore_default_args=["--enable-automation"],
-            args=["--disable-blink-features=AutomationControlled"],
+            # ⬇️ TWEAKED ARGS: Added focus prevention flags ⬇️
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-startup-window",  # Spawns window in the background
+                "--inactive"            # Tells the OS not to bring this window to the foreground
+            ],
             viewport={"width": 1920, "height": 1080},
             locale="en-CA",
             timezone_id="America/Edmonton",
@@ -477,7 +484,8 @@ async def _run_and_collect(max_listings: int, target_url: str) -> list[dict]:
 
                     collected.append(clean_listing)
 
-            await asyncio.sleep(random.uniform(6.0, 10.0))
+            # Pause between checking listings — configurable, see config.py.
+            await asyncio.sleep(random.uniform(FB_LISTING_DELAY_MIN_SECONDS, FB_LISTING_DELAY_MAX_SECONDS))
         await context.close()
 
     return collected
