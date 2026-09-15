@@ -22,17 +22,16 @@ Usage:
     # }
 """
 
-import os
 import pickle
 import logging
 import numpy as np
 import pandas as pd
-from pathlib import Path
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from Features import load_training_data, prepare_features, extract_description_flags, extract_transmission
 from models import Listing, PricePrediction, TrainingRun
+from config import MODEL_DIR
 
 def _load_csv_for_validation(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
@@ -72,9 +71,6 @@ def _load_csv_for_validation(csv_path: str) -> pd.DataFrame:
 
 
 logger = logging.getLogger(__name__)
-
-MODEL_DIR = Path(os.environ.get("MODEL_DIR", "./models"))
-MODEL_DIR.mkdir(exist_ok=True)
 
 MODEL_PATH = MODEL_DIR / "xgb_price_model.pkl"
 ENCODER_PATH = MODEL_DIR / "label_encoders.pkl"
