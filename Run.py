@@ -58,6 +58,7 @@ def cmd_scrape(max_pages: int = 5, bulk: bool = False):
     from kijiji import run as kijiji_run
     from Autotrader import run as autotrader_run
     from Facebook import run as facebook_run
+    from concurrent.futures import ThreadPoolExecutor
 
     create_tables()
 
@@ -67,46 +68,33 @@ def cmd_scrape(max_pages: int = 5, bulk: bool = False):
         known_facebook = set() if bulk else get_known_ids("facebook", session)
         dealer_ids = get_fb_dealer_ids(session)
 
-    # Kijiji
-    kijiji_listings = list(kijiji_run(max_pages=max_pages, known_ids=known_kijiji))
-    logger.info("Scraped %d listings from Kijiji", len(kijiji_listings))
-    with get_session() as session:
-        kc = upsert_batch(kijiji_listings, session)
-    print(f"\nKijiji     — New: {kc['new']} | Updated: {kc['updated']} | Errors: {kc['errors']}")
+    # ------------------------------------------------------------------
+    # Kijiji + AutoTrader — sequential within this worker, but this whole
+    # worker runs concurrently with the Facebook worker below since it's
+    # much faster and doesn't touch a browser session at all.
+    # ------------------------------------------------------------------
+    def run_kijiji_autotrader():
+        kijiji_listings = list(kijiji_run(max_pages=max_pages, known_ids=known_kijiji))
+        logger.info("Scraped %d listings from Kijiji", len(kijiji_listings))
+        with get_session() as session:
+            kc = upsert_batch(kijiji_listings, session)
+        print(f"\nKijiji     — New: {kc['new']} | Updated: {kc['updated']} | Errors: {kc['errors']}")
 
-    # AutoTrader
-    at_listings = list(autotrader_run(max_pages=max_pages, known_ids=known_autotrader))
-    logger.info("Scraped %d listings from AutoTrader", len(at_listings))
-    with get_session() as session:
-        ac = upsert_batch(at_listings, session)
-    print(f"AutoTrader — New: {ac['new']} | Updated: {ac['updated']} | Errors: {ac['errors']}")
+        at_listings = list(autotrader_run(max_pages=max_pages, known_ids=known_autotrader))
+        logger.info("Scraped %d listings from AutoTrader", len(at_listings))
+        with get_session() as session:
+            ac = upsert_batch(at_listings, session)
+        print(f"AutoTrader — New: {ac['new']} | Updated: {ac['updated']} | Errors: {ac['errors']}")
 
-    # Facebook
-    # ─── DEFINE YOUR TARGET FACEBOOK FEEDS HERE ────────────────────────
-
-    # ──────────────────────────────────────────────────────────────────
-
-    # Facebook Dynamic Multi-URL Scraping Loop
-# Facebook Dynamic Multi-URL Scraping Loop
-    for index, url in enumerate(FB_TARGET_URLS, 1):
-        logger.info(f"Scraping Facebook Feed {index}/{len(FB_TARGET_URLS)}...")
-
-        # Calculate a listing limit based on max_pages, or use your target number (e.g., 7)
+    # ------------------------------------------------------------------
+    # Facebook — single sequential pass over all target feeds (these still
+    # run one-at-a-time against each other, since they share one headed
+    # Chrome profile; only the OUTER kijiji/autotrader work is parallelized
+    # against this whole block).
+    # ------------------------------------------------------------------
+    '''def run_facebook():
         target_limit = 50  # You can hardcode 7 here, or use: max_pages * 3
 
-        fb_listings = list(facebook_run(
-            known_ids=known_facebook,
-            dealer_ids=dealer_ids,
-            target_url=url,
-            max_listings=target_limit  # ─── FIX: PASS THE LIMIT DOWN!
-        ))
-
-        logger.info("Scraped %d listings from Facebook Feed %d", len(fb_listings), index)
-        with get_session() as session:
-            fc = upsert_batch(fb_listings, session)
-        print(f"Facebook Feed {index} — New: {fc['new']} | Updated: {fc['updated']} | Errors: {fc['errors']}")
-
-        # ─── FACEBOOK INSTRUMENTATION TIMER START ─────────────────────────
         fb_start_time = time.time()
         logger.info("Starting Facebook scraping pipeline across all target feeds...")
 
@@ -116,8 +104,6 @@ def cmd_scrape(max_pages: int = 5, bulk: bool = False):
 
         for index, url in enumerate(FB_TARGET_URLS, 1):
             logger.info(f"Scraping Facebook Feed {index}/{len(FB_TARGET_URLS)}...")
-
-            target_limit = 50
 
             try:
                 fb_listings = list(facebook_run(
@@ -130,6 +116,8 @@ def cmd_scrape(max_pages: int = 5, bulk: bool = False):
                 with get_session() as session:
                     fc = upsert_batch(fb_listings, session)
 
+                print(f"Facebook Feed {index} — New: {fc['new']} | Updated: {fc['updated']} | Errors: {fc['errors']}")
+
                 total_fb_new += fc["new"]
                 total_fb_updated += fc["updated"]
                 total_fb_errors += fc["errors"]
@@ -137,12 +125,11 @@ def cmd_scrape(max_pages: int = 5, bulk: bool = False):
             except Exception as e:
                 logger.error(f"Critical error on Facebook Feed {index}: {e}")
                 total_fb_errors += 1
-        #END
+
         fb_end_time = time.time()
         elapsed_seconds = fb_end_time - fb_start_time
         elapsed_minutes = elapsed_seconds / 60
 
-        # Calculate how close you are to your 30-minute boundary
         remaining_minutes = 30.0 - elapsed_minutes
         safety_margin_pct = (remaining_minutes / 30.0) * 100
 
@@ -160,6 +147,17 @@ def cmd_scrape(max_pages: int = 5, bulk: bool = False):
                 " DANGER ZONE: Facebook scraper is taking more than 25 minutes! It might overlap with the next cron job.")
         else:
             logger.info(" SUCCESS: Scraper completed with a healthy safety margin.")
+'''
+    # Run Kijiji+AutoTrader and the Facebook pipeline at the same time.
+    # Kijiji/AutoTrader will almost certainly finish first and print their
+    # results early; the Facebook report prints whenever that thread finishes.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_fast = pool.submit(run_kijiji_autotrader)
+        #fut_fb = pool.submit(run_facebook)
+
+        # Surface any exception from either thread instead of swallowing it
+        fut_fast.result()
+        #fut_fb.result()
 
 def cmd_scrape_fast(max_pages: int = 1):
     """Quick scrape — Kijiji + AutoTrader only, no Facebook."""
@@ -186,7 +184,7 @@ def cmd_scrape_fast(max_pages: int = 1):
 def cmd_bulk():
     cmd_scrape(max_pages=100, bulk=True)
 
-def cmd_scrape_facebook(max_listings: int = 7):
+'''def cmd_scrape_facebook(max_listings: int = 7):
     from Session import create_tables, get_session
     from Ingest import upsert_batch, get_known_ids
     from Facebook import run as facebook_run
@@ -207,6 +205,7 @@ def cmd_scrape_facebook(max_listings: int = 7):
         with get_session() as session:
             fc = upsert_batch(fb_listings, session)
         print(f"Facebook   — New: {fc['new']} | Updated: {fc['updated']} | Errors: {fc['errors']}")
+        '''
 def cmd_sold_sweep():
     from Session import get_session
     from Ingest import sold_sweep
@@ -396,6 +395,143 @@ def cmd_pipeline(max_pages: int = 5):
     cmd_train()
 
 
+def cmd_scrape_statvin(max_pages: int = 5):
+    """Scrapes stat.vin salvage-auction listings. Rows are tagged
+    listing_type='salvage' at ingest time and never mix into the private
+    dataset. See scrapers/statvin.py's module docstring for known caveats
+    (Cloudflare may block direct httpx access from some networks)."""
+    from Session import create_tables, get_session
+    from Ingest import upsert_batch, get_known_ids
+    from scrapers.statvin import run as statvin_run
+
+    create_tables()
+
+    with get_session() as session:
+        known_statvin = get_known_ids("statvin", session)
+
+    statvin_listings = list(statvin_run(max_pages=max_pages, known_ids=known_statvin))
+    logger.info("Scraped %d listings from stat.vin", len(statvin_listings))
+    with get_session() as session:
+        sc = upsert_batch(statvin_listings, session)
+    print(f"\nstat.vin — New: {sc['new']} | Updated: {sc['updated']} | Errors: {sc['errors']}")
+
+
+def cmd_backfill_conditions():
+    """Runs the AI condition-extraction backfill with default settings
+    (--dataset all --batch-size 50). For finer control (--dataset private,
+    --limit N, etc.) run `python -m backfill.backfill_conditions` directly."""
+    from backfill.backfill_conditions import main as backfill_main
+    backfill_main([])
+
+
+def _print_train_result(label: str, meta: dict):
+    print(f"\n{label} trained:")
+    for key in ("train_core_samples", "training_samples", "val_samples", "test_samples", "total_samples"):
+        if key in meta:
+            print(f"  {key}: {meta[key]}")
+    for key in ("mae", "rmse", "r2", "median_abs_error", "median_pct_error", "mape"):
+        if key in meta:
+            print(f"  {key}: {meta[key]}")
+
+
+def cmd_train_private_csv():
+    """Model 1 — private listings, existing personal-CSV validation baseline (unmodified)."""
+    from Session import get_session
+    from training.private_csv import run as train_private_csv
+    import os
+
+    cv_path = "vehicles_cleaned.csv" if os.path.exists("vehicles_cleaned.csv") else None
+    with get_session() as session:
+        result = train_private_csv(session, cv_csv_path=cv_path)
+    _print_train_result("Model 1 (private_csv)", result["meta"])
+
+
+def cmd_train_private_traintest():
+    """Model 2 — private listings, new time-aware train/test split."""
+    from Session import get_session
+    from training.private_traintest import run as train_private_traintest
+
+    with get_session() as session:
+        result = train_private_traintest(session)
+    _print_train_result("Model 2 (private_traintest)", result["meta"])
+
+
+def cmd_train_dealer_traintest():
+    """Model 3 — dealer listings, new time-aware train/test split."""
+    from Session import get_session
+    from training.dealer_traintest import run as train_dealer_traintest
+
+    with get_session() as session:
+        result = train_dealer_traintest(session)
+    _print_train_result("Model 3 (dealer_traintest)", result["meta"])
+
+
+def cmd_train_salvage_traintest():
+    """Model 4 — salvage listings, new time-aware train/test split."""
+    from Session import get_session
+    from training.salvage_traintest import run as train_salvage_traintest
+
+    with get_session() as session:
+        result = train_salvage_traintest(session)
+    _print_train_result("Model 4 (salvage_traintest)", result["meta"])
+
+
+def cmd_train_all():
+    """Trains all four models that currently have enough data, skipping (and
+    reporting) any that raise a friendly ValueError for insufficient data —
+    e.g. salvage_traintest before the stat.vin scraper has run."""
+    jobs = [
+        ("Model 1 (private_csv)", cmd_train_private_csv),
+        ("Model 2 (private_traintest)", cmd_train_private_traintest),
+        ("Model 3 (dealer_traintest)", cmd_train_dealer_traintest),
+        ("Model 4 (salvage_traintest)", cmd_train_salvage_traintest),
+    ]
+    for label, fn in jobs:
+        try:
+            fn()
+        except ValueError as e:
+            print(f"\nSkipped {label}: {e}")
+
+
+def cmd_compare_models():
+    """Generates the model comparison report (reports/model_comparison.md)
+    from whatever's currently in the model_artifacts registry."""
+    from Session import get_session
+    from training import registry
+    from training.evaluate import generate_comparison_report
+
+    with get_session() as session:
+        rows = []
+        for model_key in ("private_csv", "private_traintest", "dealer_traintest", "salvage_traintest"):
+            artifact = registry.get_latest(session, model_key)
+            if artifact is None:
+                continue
+            rows.append({"model_name": f"{model_key} ({artifact.version})", **artifact.metrics})
+
+    if not rows:
+        print("No trained models found in the registry yet. Run `python run.py train_all` first.")
+        return
+    generate_comparison_report(rows)
+
+
+def cmd_compare_private_fair():
+    """Fair, apples-to-apples comparison: scores Model A (private_csv) and
+    Model B (private_traintest) on the SAME held-out rows (Model B's own
+    time-aware test split), each with its own encoders — unlike
+    compare_models, which just tabulates each model's own self-reported
+    metrics from two different evaluation sets. See
+    training.evaluate.compare_private_baseline_vs_traintest for the documented
+    caveat this doesn't (and can't, without retraining Model A) fully solve."""
+    from Session import get_session
+    from training.evaluate import compare_private_baseline_vs_traintest
+
+    with get_session() as session:
+        try:
+            compare_private_baseline_vs_traintest(session)
+        except ValueError as e:
+            print(f"\n{e}")
+
+
 COMMANDS = {
     "scrape":      cmd_scrape,
     "bulk":        cmd_bulk,
@@ -405,8 +541,17 @@ COMMANDS = {
     "pipeline":    cmd_pipeline,
     "status":      cmd_status,
     "scrape_fast": cmd_scrape_fast,
-    "scrape_facebook": cmd_scrape_facebook,
-    "backfill_kijiji": cmd_backfill_descriptions
+    #"scrape_facebook": cmd_scrape_facebook,
+    "scrape_statvin": cmd_scrape_statvin,
+    "backfill_kijiji": cmd_backfill_descriptions,
+    "backfill_conditions": cmd_backfill_conditions,
+    "train_private_csv": cmd_train_private_csv,
+    "train_private_traintest": cmd_train_private_traintest,
+    "train_dealer_traintest": cmd_train_dealer_traintest,
+    "train_salvage_traintest": cmd_train_salvage_traintest,
+    "train_all": cmd_train_all,
+    "compare_models": cmd_compare_models,
+    "compare_private_fair": cmd_compare_private_fair,
 }
 
 if __name__ == "__main__":
@@ -416,7 +561,7 @@ if __name__ == "__main__":
         print(f"Available: {', '.join(COMMANDS)}")
         sys.exit(1)
 
-    if cmd in ("scrape", "pipeline", "bulk") and len(sys.argv) > 2:
+    if cmd in ("scrape", "pipeline", "bulk", "scrape_statvin") and len(sys.argv) > 2:
         COMMANDS[cmd](max_pages=int(sys.argv[2]))
     else:
         COMMANDS[cmd]()
