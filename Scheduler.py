@@ -2,10 +2,13 @@
 scheduler.py
 
 Parallel Schedule:
-  Every 1 minute (8am-10pm)  — quick scrape page 1 of Kijiji + AutoTrader (Blocking, fast)
+  Every 1 minute (8am-10pm) — quick scrape page 1 of Kijiji + AutoTrader (blocking, fast)
   Every 3 hours (8am-10pm)  — Facebook scrape runs in background
-  Every day 6am             — full bulk maintenance sweep
-  Every day 10pm            — retrain model on fresh data
+  Every day 6:00 AM         — full bulk maintenance sweep:
+                                 bulk scrape -> sold sweep -> stat.vin salvage scrape
+                                 -> AI condition backfill (GPU/Ollama, runs once here only)
+  Every day 10:00 PM        — retrain ALL FOUR models (private_csv, private_traintest,
+                                 dealer_traintest, salvage_traintest) via train_all
 """
 
 import sys
@@ -13,7 +16,7 @@ import time
 import threading
 import logging
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,26 +55,19 @@ def fast_worker():
 # -----------------------------
 # 2. FACEBOOK LOOP (3-hour cycle)
 # -----------------------------
-def facebook_worker():
+#def facebook_worker():
     while True:
         now = datetime.now()
 
-        # 1. If it's night time, sleep comfortably until 8:00 AM
         if now.hour < 8 or now.hour >= 22:
             logger.info("Outside operating hours. Facebook worker going to sleep until 8:00 AM...")
-
-            # Calculate seconds until 8:00 AM
             target_time = now.replace(hour=8, minute=0, second=0, microsecond=0)
             if now.hour >= 22:
-                # If it's late at night, target 8am tomorrow
-                from datetime import timedelta
                 target_time += timedelta(days=1)
-
             sleep_duration = (target_time - now).total_seconds()
             time.sleep(sleep_duration)
-            continue  # Wake up and re-evaluate
+            continue
 
-        # 2. If we are in bounds, fire the scraper exactly once
         try:
             logger.info("Launching Facebook scrape (background)...")
             subprocess.Popen(
@@ -82,15 +78,26 @@ def facebook_worker():
         except Exception as e:
             logger.exception(f"Facebook launch failed: {e}")
 
-        # 3. CRITICAL: Hard sleep for 3 hours after firing to guarantee zero spamming
         logger.info("Facebook scrape dispatched. Locking loop for 3 hours...")
         time.sleep(3 * 60 * 60)
 
-# -----------------------------
-# 3. DAILY MAINTENANCE LOOP (6am & 10pm)
-# -----------------------------
+
+# ------------------------------------------------------------------
+# 3. DAILY MAINTENANCE LOOP
+#
+#    6:00 AM  — bulk scrape -> sold sweep -> stat.vin salvage scrape
+#               -> AI condition backfill (GPU/Ollama work)
+#
+#    Backfill is chained directly after scraping (not scheduled at its
+#    own fixed clock-minute) because subprocess.run() blocks this thread
+#    while bulk/sold_sweep/statvin run. If backfill instead waited for
+#    an exact minute like 6:30, and bulk was still running past 6:30,
+#    the loop would never get back to the top in time to catch that
+#    exact minute and would skip a full day. Chaining sidesteps that.
+#
+#    10:00 PM — retrain ALL FOUR models via train_all
+# ------------------------------------------------------------------
 def maintenance_worker():
-    # Flags to ensure jobs only run ONCE during their target minute
     bulk_run_today = False
     train_run_today = False
     current_day = datetime.now().date()
@@ -98,25 +105,35 @@ def maintenance_worker():
     while True:
         now = datetime.now()
 
-        # Reset the daily flags if we roll over to a new day
         if now.date() != current_day:
             current_day = now.date()
             bulk_run_today = False
             train_run_today = False
 
         try:
-            # --- 6:00 AM Bulk Sweep ---
+            # --- 6:00 AM: scrape everything, then backfill conditions ---
             if now.hour == 6 and now.minute == 0 and not bulk_run_today:
                 logger.info("Running global bulk scrape (including Facebook)...")
                 subprocess.run([PYTHON, RUN_SCRIPT, "bulk"])
+
                 logger.info("Running sold detection sweep...")
                 subprocess.run([PYTHON, RUN_SCRIPT, "sold_sweep"])
+
+                logger.info("Scraping stat.vin salvage listings...")
+                subprocess.run([PYTHON, RUN_SCRIPT, "scrape_statvin", "5"])
+
+                logger.info("Running AI condition backfill (GPU machine)...")
+                subprocess.run([PYTHON, RUN_SCRIPT, "backfill_conditions"])
+
                 bulk_run_today = True
 
-            # --- 10:00 PM Model Retraining ---
+            # --- 10:00 PM: retrain all four models ---
             elif now.hour == 22 and now.minute == 0 and not train_run_today:
-                logger.info("Retraining model...")
-                subprocess.run([PYTHON, RUN_SCRIPT, "train"])
+                logger.info(
+                    "Retraining all models (private_csv, private_traintest, "
+                    "dealer_traintest, salvage_traintest)..."
+                )
+                subprocess.run([PYTHON, RUN_SCRIPT, "train_all"])
                 train_run_today = True
 
         except Exception as e:
@@ -133,11 +150,11 @@ if __name__ == "__main__":
     logger.info("Starting parallel scraper system...")
 
     t1 = threading.Thread(target=fast_worker, daemon=True)
-    t2 = threading.Thread(target=facebook_worker, daemon=True)
+    #t2 = threading.Thread(target=facebook_worker, daemon=True)
     t3 = threading.Thread(target=maintenance_worker, daemon=True)
 
     t1.start()
-    t2.start()
+    #t2.start()
     t3.start()
 
     # keep main thread alive
