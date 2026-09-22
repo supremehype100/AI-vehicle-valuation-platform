@@ -1,0 +1,35 @@
+# =============================================================================
+# docker-compose.cpu-only.yml — override to disable GPU passthrough
+# =============================================================================
+#
+# Use this on hosts without an NVIDIA GPU, without a recent-enough NVIDIA
+# driver, or without the NVIDIA Container Toolkit (nvidia-ctk) installed —
+# i.e. any host where the `deploy.resources.reservations.devices` GPU block in
+# docker-compose.yml's `ollama` service would fail instead of being ignored.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.cpu-only.yml up
+#   docker compose -f docker-compose.yml -f docker-compose.cpu-only.yml run --rm app python run.py status
+#
+# This override removes the `deploy:` block from `ollama` so it starts
+# CPU-only. Ollama itself also auto-detects the absence of a GPU and falls
+# back to CPU automatically even without this override — this file exists for
+# the case where the GPU reservation block itself causes Compose/Docker to
+# error out rather than gracefully skip it. See docs/GPU_SETUP.md for the
+# performance trade-off (CPU inference on a 7B vision-language model is slow;
+# this restores correctness/startup, not speed).
+#
+# NOTE on the `!reset` tag: Compose's default merge behavior for list-typed
+# fields (like `deploy.resources.reservations.devices`) is to CONCATENATE
+# lists across -f files, not replace them — so simply omitting the block here
+# would NOT remove it. `!reset` (Compose Specification / Docker Compose
+# v2.24+, released Nov 2023) explicitly clears a value instead of merging it,
+# which is what we need to fully drop the GPU reservation. If you're on an
+# older `docker compose` that doesn't understand `!reset` (it will error on
+# an unrecognized tag), the fallback is simply to comment out the `deploy:`
+# block directly in docker-compose.yml rather than using this override.
+# =============================================================================
+
+services:
+  ollama:
+    deploy: !reset null

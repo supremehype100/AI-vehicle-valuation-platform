@@ -1,0 +1,169 @@
+# =============================================================================
+# docker-compose.yml — infra for the vehicle_intel scraping/AI/training stack
+# =============================================================================
+#
+# `docker compose up` brings up infrastructure ONLY: Postgres (db), Ollama
+# (ollama), and an idle `app` container. It does NOT start any scrape, train,
+# or backfill job automatically — those are one-off `docker compose run`
+# invocations you trigger explicitly. This is deliberate: scraping and
+# training are long-running / side-effecting jobs that should never fire just
+# because someone ran `docker compose up` to check the stack is healthy.
+#
+# First-time setup:
+#   1. cp .env.example .env        (adjust values if needed)
+#   2. docker compose up -d db ollama
+#   3. docker compose exec ollama ollama pull qwen2.5vl:7b   (one-time, ~5GB download)
+#   4. docker compose run --rm app python run.py status      (sanity check DB connectivity)
+#
+# Common job invocations (all via `docker compose run --rm app ...`, which
+# creates a throwaway container using the same image/network/env as `app`
+# but does NOT affect the idle `app` container from `up`):
+#
+#   Fast scrape (1 page):                docker compose run --rm app python run.py scrape_fast
+#   Full bulk scrape:                    docker compose run --rm app python run.py bulk
+#   Sold-listing sweep:                  docker compose run --rm app python run.py sold_sweep
+#   Kijiji description backfill:         docker compose run --rm app python run.py backfill_kijiji
+#   Train (current single model):        docker compose run --rm app python run.py train
+#   Value a listing / run pipeline:      docker compose run --rm app python run.py pipeline
+#   Status check:                        docker compose run --rm app python run.py status
+#
+#   Condition backfill (AI pipeline, resumable/idempotent):
+#                                         docker compose run --rm app python -m backfill.backfill_conditions --resume
+#                                         docker compose run --rm app python -m backfill.backfill_conditions --dataset private --batch-size 100
+#
+#   Per-model XGBoost training (training/ package — Model 1-4):
+#     Model 1 — private / personal-CSV baseline (unmodified Model.py):
+#                                         docker compose run --rm app python run.py train_private_csv
+#     Model 2 — private / new time-aware train-test split:
+#                                         docker compose run --rm app python run.py train_private_traintest
+#     Model 3 — dealer / new time-aware train-test split:
+#                                         docker compose run --rm app python run.py train_dealer_traintest
+#     Model 4 — salvage / new time-aware train-test split (needs stat.vin data first):
+#                                         docker compose run --rm app python run.py train_salvage_traintest
+#     All four at once (skips any without enough data yet):
+#                                         docker compose run --rm app python run.py train_all
+#     Comparison report (reports/model_comparison.md) from the registry:
+#                                         docker compose run --rm app python run.py compare_models
+#
+#   stat.vin salvage scraper:            docker compose run --rm app python run.py scrape_statvin
+#
+#   Facebook Marketplace scraper — SEE CAVEAT BELOW before using in Docker:
+#                                         docker compose run --rm app python run.py scrape_facebook
+#
+# -----------------------------------------------------------------------------
+# CAVEAT — Facebook.py is not a clean containerization candidate
+# -----------------------------------------------------------------------------
+# Facebook.py drives Playwright with headless=False against a PERSISTENT local
+# Chrome profile at ./fb_chrome_profile_fresh (a real, already-logged-in FB
+# session). That profile is gitignored/dockerignored on purpose — it is
+# machine-specific, stateful, and tied to a real account login, and headless=
+# False means it wants an actual display. Running it "in Docker" would require
+# X11/VNC forwarding plus re-establishing that login state inside the
+# container, which defeats the point of the persistent profile living on the
+# host. It's included above as a `docker compose run` target for consistency
+# with the other scrapers, but in practice you'll likely keep running
+# Facebook.py directly on the host (outside this compose stack) against the
+# existing ./fb_chrome_profile_fresh, and only use Docker for Kijiji/
+# AutoTrader/stat.vin/training/backfill. If you do want it containerized,
+# treat that as a separate follow-up (headed browser + X11 forwarding), not
+# something this compose file attempts.
+#
+# -----------------------------------------------------------------------------
+# GPU passthrough (ollama service) — summary; see docs/GPU_SETUP.md for detail
+# -----------------------------------------------------------------------------
+# The `ollama` service below requests GPU access via the Compose Spec's
+# `deploy.resources.reservations.devices` block (`driver: nvidia`). This is
+# NOT swarm-only — plain `docker compose` (v2) honors it too, PROVIDED the
+# host has an NVIDIA GPU, a recent driver, and the NVIDIA Container Toolkit
+# installed (`nvidia-ctk`). On a host without that toolkit, or with a Docker
+# Compose version that doesn't understand the block, Compose will either
+# ignore it or fail depending on version — if you hit an error rather than a
+# silent ignore, use the provided CPU-only override:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.cpu-only.yml up
+#
+# which removes the `deploy:` block entirely so Ollama runs CPU-only (Ollama
+# itself also auto-falls-back to CPU if it doesn't see a GPU, just much
+# slower — see docs/GPU_SETUP.md).
+# =============================================================================
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vehicle_intel}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      # Published to host for convenience (psql/DBeaver from the host). Remove
+      # this mapping if you only want db reachable from inside the compose
+      # network.
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-vehicle_intel}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  ollama:
+    image: ollama/ollama
+    restart: unless-stopped
+    volumes:
+      # Named volume so pulled models (multi-GB) persist across container
+      # recreation instead of re-downloading every time.
+      - ollama_data:/root/.ollama
+    ports:
+      # Exposed to the host too, mainly for convenience (curling the API
+      # directly / debugging). Only strictly required inside the compose
+      # network, where `app` reaches it at http://ollama:11434.
+      - "11434:11434"
+    # GPU reservation — see the "GPU passthrough" comment block above and
+    # docs/GPU_SETUP.md for prerequisites (NVIDIA driver + nvidia-ctk).
+    # Compose Spec v3.8+ honors this under plain `docker compose` (non-swarm)
+    # as long as the NVIDIA Container Toolkit is installed on the host; if
+    # your Docker setup errors on this block instead of gracefully skipping
+    # it, use docker-compose.cpu-only.yml to drop it.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  app:
+    build:
+      context: New folder
+      dockerfile: Dockerfile
+    # No restart policy — this is a job-runner image, not a long-lived
+    # service. The default command below is an idle no-op; real work happens
+    # via `docker compose run --rm app <command>` (see the invocations listed
+    # at the top of this file).
+    command: ["python", "-c", "print('app image ready — use: docker compose run --rm app <command>')"]
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/${POSTGRES_DB:-vehicle_intel}
+      OLLAMA_HOST: http://ollama:11434
+      QWEN_MODEL: ${QWEN_MODEL:-qwen2.5vl:7b}
+      OLLAMA_USE_GPU: ${OLLAMA_USE_GPU:-true}
+      MODEL_DIR: /app/models
+      IMAGE_CACHE_DIR: /app/image_cache
+    volumes:
+      # Trained artifacts (XGBoost pickles, registry) persist on the host.
+      - ./models:/app/models
+      # Downloaded/resized listing images persist on the host (large, reused
+      # across backfill runs — no reason to re-download on every container
+      # restart).
+      - ./image_cache:/app/image_cache
+
+volumes:
+  db_data:
+  ollama_data:
