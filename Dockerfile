@@ -43,7 +43,7 @@ RUN playwright install --with-deps chromium
 # Now copy the actual project code. .dockerignore keeps fb_chrome_profile_fresh/,
 # fb_session/, *.csv, models/*.pkl, image_cache/, reports/, and .git out of the
 # build context entirely.
-COPY New .
+COPY . .
 
 # Directories config.py expects to exist / write into at runtime — created here
 # so a fresh container has them even before any volume is mounted; in
