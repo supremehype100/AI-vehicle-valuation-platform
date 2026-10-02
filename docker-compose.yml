@@ -12,7 +12,7 @@
 # First-time setup:
 #   1. cp .env.example .env        (adjust values if needed)
 #   2. docker compose up -d db ollama
-#   3. docker compose exec ollama ollama pull qwen2.5vl:7b   (one-time, ~5GB download)
+#   3. docker compose exec ollama ollama pull qwen3-vl:4b-thinking   (one-time download)
 #   4. docker compose run --rm app python run.py status      (sanity check DB connectivity)
 #
 # Common job invocations (all via `docker compose run --rm app ...`, which
@@ -150,9 +150,9 @@ services:
       ollama:
         condition: service_started
     environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/${POSTGRES_DB:-vehicle_intel}
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-vehicle_intel}
       OLLAMA_HOST: http://ollama:11434
-      QWEN_MODEL: ${QWEN_MODEL:-qwen2.5vl:7b}
+      QWEN_MODEL: ${QWEN_MODEL:-qwen3-vl:4b-thinking}
       OLLAMA_USE_GPU: ${OLLAMA_USE_GPU:-true}
       MODEL_DIR: /app/models
       IMAGE_CACHE_DIR: /app/image_cache

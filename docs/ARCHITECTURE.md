@@ -94,7 +94,7 @@ explicitly neutralized (forced to 0 for all rows) in every new train-test pipeli
 
 ## GPU / AI pipeline
 
-`condition/ollama_client.py` talks to a local Ollama server (`OLLAMA_HOST`) running a quantized Qwen2.5-VL model
-(`QWEN_MODEL`, default `qwen2.5vl:7b`) over its REST API — no separate `ollama` Python package, reusing the
+`condition/ollama_client.py` talks to a local Ollama server (`OLLAMA_HOST`) running a quantized Qwen vision-language model
+(`QWEN_MODEL`, default `qwen3-vl:4b-thinking`) over its REST API — no separate `ollama` Python package, reusing the
 project's existing `httpx` dependency. See `docs/GPU_SETUP.md` (or the top of `docker-compose.yml`) for VRAM sizing
 against the target GTX 1080 Ti (11GB).
