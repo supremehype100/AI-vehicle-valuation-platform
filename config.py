@@ -56,6 +56,10 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql://postgres:postgres@localhost:5432/vehicle_intel",
 )
+# SQLAlchemy 2.1+ maps a bare "postgresql://" to psycopg (v3); this project
+# ships psycopg2, so pin the driver explicitly whatever version is installed.
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = "postgresql+psycopg2://" + DATABASE_URL[len("postgresql://"):]
 
 # ---------------------------------------------------------------------------
 # Model artifact storage (XGBoost pickles, label encoders, registry)
