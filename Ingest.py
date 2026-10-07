@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 from datetime import datetime, timezone
+from dateutil import parser as dateparser
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from models import Listing, DBListingSnapshot as ListingSnapshot
@@ -11,6 +12,16 @@ logger = logging.getLogger(__name__)
 
 def utcnow():
     return datetime.now(tz=timezone.utc)
+
+
+def _parse_datetime(value):
+    """Parse an ISO-ish string into a datetime; pass datetimes/None through."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return dateparser.parse(value)
+    except (ValueError, OverflowError):
+        return None
 
 
 def _has_changed(existing: Listing, incoming: dict) -> bool:
@@ -43,23 +54,8 @@ def upsert(listing_dict: dict, session: Session) -> str:
     ).scalar_one_or_none()
 
     if existing is None:
-        # Parse posted_at / auction_date if they're strings
-        posted_at = listing_dict.get("posted_at")
-        if isinstance(posted_at, str):
-            try:
-                from dateutil import parser as dateparser
-                posted_at = dateparser.parse(posted_at)
-            except Exception:
-                posted_at = None
-
-        auction_date = listing_dict.get("auction_date")
-        if isinstance(auction_date, str):
-            try:
-                from dateutil import parser as dateparser
-                auction_date = dateparser.parse(auction_date)
-            except Exception:
-                auction_date = None
-        listing_dict = {**listing_dict, "auction_date": auction_date}
+        posted_at = _parse_datetime(listing_dict.get("posted_at"))
+        auction_date = _parse_datetime(listing_dict.get("auction_date"))
 
         row = Listing(
             source=source,
@@ -91,7 +87,7 @@ def upsert(listing_dict: dict, session: Session) -> str:
             damage_secondary=listing_dict.get("damage_secondary"),
             title_type=listing_dict.get("title_type"),
             auction_house=listing_dict.get("auction_house"),
-            auction_date=listing_dict.get("auction_date"),
+            auction_date=auction_date,
             lot_number=listing_dict.get("lot_number"),
             run_drive_status=listing_dict.get("run_drive_status"),
             auction_sale_status=listing_dict.get("auction_sale_status"),
@@ -148,11 +144,13 @@ def upsert_batch(listings: list[dict], session: Session) -> dict:
     counters = {"new": 0, "updated": 0, "unchanged": 0, "errors": 0}
     for listing in listings:
         try:
-            result = upsert(listing, session)
+            # Savepoint per listing: a failure rolls back only this row, not
+            # the rows already upserted earlier in the batch.
+            with session.begin_nested():
+                result = upsert(listing, session)
             counters[result] += 1
         except Exception as e:
             logger.error("Failed to upsert %s:%s — %s", listing.get("source"), listing.get("source_id"), e)
-            session.rollback()
             counters["errors"] += 1
     session.commit()
     return counters
@@ -175,9 +173,13 @@ def sold_sweep(source: str, seen_ids: set[str], session: Session) -> dict:
 
     Returns counters: {"removed": n}
     """
+    if not seen_ids:
+        # An empty scrape almost certainly means the fetch failed or the site
+        # blocked us; treating that as "everything sold" would wipe the table.
+        logger.warning("Sold sweep for %s skipped: no listings were seen this run", source)
+        return {"removed": 0}
+
     now = utcnow()
-
-
 
     # Find all active listings for this source not in the current scrape
     active_listings = session.execute(
