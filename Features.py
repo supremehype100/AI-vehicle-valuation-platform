@@ -53,7 +53,7 @@ POSITIVE_SIGNALS = {
     "one_owner": r"one owner|1 owner|single owner|first owner|original owner",
     "new_tires": r"new tires?|winter tires?|all[- ]season",
     "new_brakes": r"new brakes?|brakes? replaced",
-    "recent_service": r"recently serviced|just serviced|full service|dealer serviced|full service history|dealer service history|service history|new",
+    "recent_service": r"recently serviced|just serviced|full service|dealer serviced|full service history|dealer service history|service history",
     "no_rust": r"no rust|rust free|rust-free",
     "immaculate": r"immaculate|mint|pristine",
     "rebuilt_engine": r"rebuilt engine|new engine|engine rebuilt",
