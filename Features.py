@@ -1,10 +1,9 @@
-from __future__ import annotations
-
 """
-ml/features.py
+Features.py
 
 Converts raw listing data into features for the price prediction model.
 """
+from __future__ import annotations
 
 import re
 import pandas as pd
