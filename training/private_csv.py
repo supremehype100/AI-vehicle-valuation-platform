@@ -3,11 +3,10 @@ from __future__ import annotations
 """
 training/private_csv.py
 
-Model A — the existing, untouched baseline. This module does NOT
-reimplement any training logic; it calls `Model.train()` (finalized,
-off-limits to edit) exactly as before, and adds model-registry bookkeeping
-on top so the baseline shows up in `model_artifacts` alongside the newer
-pipelines (private_traintest / dealer_traintest / salvage_traintest).
+Model A — the baseline. This module does NOT reimplement any training
+logic; it calls `Model.train()` and adds model-registry bookkeeping on top so
+the baseline shows up in `model_artifacts` alongside the newer pipelines
+(private_traintest / dealer_traintest / salvage_traintest).
 
 `Model.train()` already benefits from the `listing_type="private"` default
 filter baked into `Features.load_training_data()` (an intentional,
@@ -25,15 +24,14 @@ from training.fingerprint import compute_proxy_fingerprint
 
 def run(session: Session, cv_csv_path: str | None = None) -> dict:
     """
-    Train Model A exactly as before (via the untouched Model.train()) and
-    register the resulting artifact in model_artifacts.
+    Train Model A via Model.train() and register the resulting artifact in
+    model_artifacts.
 
     Returns {"meta": <dict returned by Model.train()>, "artifact": <ModelArtifact>}.
     """
     meta = Model.train(session, cv_csv_path=cv_csv_path)
 
-    # Model.train() (finalized/off-limits) doesn't return the row IDs it
-    # trained on, only aggregate counts — so unlike the *_traintest
+    # Model.train() doesn't return the row IDs it trained on, only aggregate counts — so unlike the *_traintest
     # pipelines (which fingerprint the exact listing IDs used), this is a
     # proxy fingerprint over available metadata. It still reliably detects
     # "did anything about this run's inputs change" (sample counts, feature
@@ -59,7 +57,7 @@ def run(session: Session, cv_csv_path: str | None = None) -> dict:
         feature_list=meta.get("feature_names", []),
         model_config={},
         metrics={k: meta[k] for k in ("mae", "r2", "median_pct_error")},
-        notes="Model A baseline — unmodified Model.train(), wrapped only for registry bookkeeping.",
+        notes="Model A baseline — Model.train(), wrapped only for registry bookkeeping.",
     )
 
     return {"meta": meta, "artifact": artifact}

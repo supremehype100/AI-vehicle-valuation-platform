@@ -1,6 +1,5 @@
-from __future__ import annotations
 """
-ml/model.py
+Model.py
 
 Trains an XGBoost price prediction model on scraped listings
 and provides a valuation function.
@@ -21,6 +20,7 @@ Usage:
     #   "training_samples": 412,
     # }
 """
+from __future__ import annotations
 
 import pickle
 import logging
@@ -32,6 +32,7 @@ from sqlalchemy import select
 from Features import load_training_data, prepare_features, extract_description_flags, extract_transmission
 from models import Listing, PricePrediction, TrainingRun
 from config import MODEL_DIR
+from training.leakage import zero_out_leaky_features
 
 def _load_csv_for_validation(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
@@ -102,6 +103,7 @@ def train(session: Session, cv_csv_path: str | None = None) -> dict:
             f"Only {len(df_train)} samples — need at least {MIN_TRAINING_SAMPLES}."
         )
 
+    df_train = zero_out_leaky_features(df_train)
     X_train, y_train, encoders = prepare_features(df_train, fit=True)
 
     if cv_csv_path:
@@ -229,7 +231,7 @@ def valuate(
         "body_type": (body_type or "unknown").lower().strip(),
         "drivetrain": (drivetrain or "unknown").lower().strip(),
         "fuel_type": (fuel_type or "unknown").lower().strip(),
-        "transmission": "unknown",
+        "transmission": extract_transmission(description),
         **desc_flags,
     }
 

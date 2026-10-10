@@ -19,22 +19,17 @@ downstream of (and correlated with) the very price decision the model is
 supposed to inform.
 
 Yet `Model.valuate()` always calls with `days_on_market=0` at inference time
-(see its `row = {...}` dict — `"days_on_market": 0` is hardcoded). So the
-existing baseline (Model A / private_csv) trains on a feature whose
-training-time distribution (real, nonzero, "how long did this take to sell"
-values) does not match its serve-time value (always 0). That's a real
-train/serve skew that lets the model learn spurious structure from
-days_on_market during training that it can never use correctly at inference.
+(see its `row = {...}` dict — `"days_on_market": 0` is hardcoded). Training on
+the real, nonzero values and serving with 0 is a train/serve skew that lets a
+model learn spurious structure from days_on_market that it can never use
+correctly at inference.
 
-This is pre-existing behavior in `Features.py` / `Model.py`, both of which
-are finalized/out of scope to modify here. It is NOT fixed in
-Model.py/Features.py by this package. Instead, every NEW pipeline in this
-package (private_traintest, dealer_traintest, salvage_traintest) neutralizes
-it directly: `zero_out_leaky_features()` below forces `days_on_market = 0`
-on every row (train AND test) BEFORE `Features.prepare_features()` is
-called, so the column becomes a constant the model cannot extract any
-predictive signal from — matching its always-0 value at inference and
-removing the skew, without touching the finalized files.
+`zero_out_leaky_features()` below forces `days_on_market = 0` on every row
+(train AND test) BEFORE `Features.prepare_features()` is called, so the
+column becomes a constant the model cannot extract any predictive signal
+from — matching its always-0 value at inference. Every pipeline uses it:
+`Model.train()` (Model A / private_csv) as well as private_traintest,
+dealer_traintest and salvage_traintest.
 
 FEATURE_AVAILABILITY
 ---------------------
@@ -114,11 +109,10 @@ FEATURE_AVAILABILITY: dict[str, dict[str, object]] = {
         "available_at_prediction_time": True,
         "reason": (
             "Inferred from description/raw_json text at training time; at "
-            "serve time Model.valuate() passes 'unknown' explicitly (no "
-            "description-based inference at inference time), which is a "
-            "valid value in the encoder vocabulary — no crash, just a less "
-            "informative fallback. Not a leak (no future information used), "
-            "just a weaker signal at serve time than at train time."
+            "serve time Model.valuate() applies the same description-based "
+            "inference (extract_transmission), defaulting to 'automatic' "
+            "exactly as training does — no train/serve skew, and no future "
+            "information used."
         ),
     },
     # --- description-derived boolean flags ---
