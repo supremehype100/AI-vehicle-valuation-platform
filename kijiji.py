@@ -18,7 +18,6 @@ prefixed with "AutosListing:". No nested edges/nodes to traverse.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import random
@@ -29,6 +28,34 @@ from Features import is_valid_price
 import httpx
 from bs4 import BeautifulSoup
 
+
+logger = logging.getLogger(__name__)
+
+BASE_URL = "https://www.kijiji.ca"
+
+# Category + location slug — adjust city slug + location ID as needed.
+# Format: /b-{category}/{city-slug}/c{category-id}l{location-id}
+# Calgary vehicles: c174l1700199
+# Canada-wide:      c174l0
+SEARCH_URL = BASE_URL + "/b-cars-trucks/calgary/page-{page}/c174l1700199?for-sale-by=ownr"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-CA,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.kijiji.ca",
+}
+
+VIN_RE = re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b')
+
+
+# ---------------------------------------------------------------------------
+# Description cleanup
+# ---------------------------------------------------------------------------
 
 def clean_description(text: str | None) -> str:
     """Collapses line breaks, breaks up bullets, and outputs clean prose for ML."""
@@ -46,7 +73,6 @@ def clean_description(text: str | None) -> str:
 def fetch_full_description(listing_url: str, client: httpx.Client) -> str | None:
     """Navigates to the listing page to grab the full description from its local Apollo State."""
     try:
-        # Re-use the master HEADERS from your script
         resp = client.get(listing_url, headers=HEADERS, timeout=10)
         if resp.status_code != 200:
             return None
@@ -73,28 +99,6 @@ def fetch_full_description(listing_url: str, client: httpx.Client) -> str | None
     except Exception as e:
         logger.error("Failed to fetch detailed description from VIP %s: %s", listing_url, e)
     return None
-logger = logging.getLogger(__name__)
-
-BASE_URL = "https://www.kijiji.ca"
-
-# Category + location slug — adjust city slug + location ID as needed.
-# Format: /b-{category}/{city-slug}/c{category-id}l{location-id}
-# Calgary vehicles: c174l1700199
-# Canada-wide:      c174l0
-SEARCH_URL = BASE_URL + "/b-cars-trucks/calgary/page-{page}/c174l1700199?for-sale-by=ownr"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-CA,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Referer": "https://www.kijiji.ca",
-}
-
-VIN_RE = re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b')
 
 
 # ---------------------------------------------------------------------------
@@ -226,22 +230,15 @@ def _extract_vin(text: str | None) -> str | None:
     return m.group(0) if m else None
 
 
-def _make_fingerprint(year, make, model, mileage, city) -> str | None:
-    if not all([year, make, model]):
+def normalize(raw: dict) -> dict | None:
+    """
+    Convert a raw Apollo AutosListing dict into a clean flat dict ready for
+    Ingest.upsert() (which computes the fingerprint).
+
+    Returns None if the listing has no id or no valid price.
+    """
+    if not raw.get("id"):
         return None
-    mileage_bucket = round((mileage or 0) / 5000) * 5000
-    key = f"{year}:{str(make).lower()}:{str(model).lower()}:{mileage_bucket}:{str(city or '').lower()}"
-    return hashlib.md5(key.encode()).hexdigest()
-
-
-def normalize(raw: dict) -> dict:
-    """
-    Convert a raw Apollo AutosListing dict into a clean flat dict
-    ready to be passed to RawListing(**result).
-
-    Returns a plain dict rather than importing RawListing here
-    so this module stays dependency-light and easily testable.
-    """
     attrs = _parse_attributes(raw.get("attributes", []))
     location_str = _parse_location(raw.get("location"))
     price = _parse_price(raw.get("price"))
@@ -288,14 +285,11 @@ def normalize(raw: dict) -> dict:
     if listing_url and not listing_url.startswith("http"):
         listing_url = BASE_URL + listing_url
 
-    fingerprint = _make_fingerprint(year, make_raw, model_raw, mileage, location_str)
-
     return {
         "source": "kijiji",
-        "source_id": str(raw.get("id", "")),
+        "source_id": str(raw["id"]),
         "url": listing_url,
         "vin": vin,
-        "fingerprint": fingerprint,
 
         "title": raw.get("title"),
         "make": make_raw,
@@ -356,7 +350,7 @@ def scrape_page(page: int, client: httpx.Client) -> list[dict]:
         return []
 
     logger.info("Page %d: found %d listings", page, len(raw_listings))
-    return [normalize(r) for r in raw_listings if normalize(r) is not None]
+    return [n for r in raw_listings if (n := normalize(r)) is not None]
 
 
 def run(
@@ -380,9 +374,6 @@ def run(
 
             new_on_page = 0
             for listing in listings:
-                if listing is None:
-                    continue
-
                 # Check if this is a brand new ad we need to process
                 if listing["source_id"] not in known_ids:
                     new_on_page += 1
