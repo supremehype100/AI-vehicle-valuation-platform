@@ -12,7 +12,6 @@ Key URL params:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import random
@@ -20,6 +19,7 @@ import re
 import time
 from typing import Generator
 from Features import is_valid_price
+from kijiji import clean_description
 
 import httpx
 from bs4 import BeautifulSoup
@@ -117,88 +117,12 @@ def _find_listings_recursive(data, depth=0) -> list[dict]:
 # Normalise
 # ---------------------------------------------------------------------------
 
-def _parse_price(raw) -> float | None:
-    if raw is None:
-        return None
-    if isinstance(raw, (int, float)):
-        return float(raw) if raw > 0 else None
-    if isinstance(raw, dict):
-        val = raw.get("value") or raw.get("amount") or raw.get("price")
-        return float(val) if val and float(val) > 0 else None
-    if isinstance(raw, str):
-        cleaned = re.sub(r'[^\d.]', '', raw)
-        return float(cleaned) if cleaned else None
-    return None
-
-
 def _extract_vin(text: str | None) -> str | None:
     if not text:
         return None
     m = VIN_RE.search(str(text).upper())
     return m.group(0) if m else None
 
-
-def _make_fingerprint(year, make, model, mileage, city) -> str | None:
-    if not all([year, make, model]):
-        return None
-    bucket = round((mileage or 0) / 5000) * 5000
-    key = f"{year}:{str(make).lower()}:{str(model).lower()}:{bucket}:{str(city or '').lower()}"
-    return hashlib.md5(key.encode()).hexdigest()
-
-
-def clean_at_description(text: str | None) -> str:
-    """Collapses newlines, clears out bullet points, and flattens prose for NLP processing."""
-    if not text:
-        return ""
-    # Convert carriage returns and multi-line breaks to flat spaces
-    cleaned = text.replace("\r", " ").replace("\n", " ")
-    # Clean out structural artifacts/bullet dash tags that split keywords
-    cleaned = re.sub(r'[-\u2013\u2014*_•]+', ' ', cleaned)
-    # Condense consecutive multiple spacing blocks down to single spaces
-    cleaned = re.sub(r'\s+', ' ', cleaned)
-    return cleaned.strip()
-
-
-def fetch_at_full_description(listing_url: str, client: httpx.Client) -> str | None:
-    """Visits AutoTrader's individual listing URL to extract the complete un-truncated description."""
-    try:
-        # Re-uses the main file level HEADERS block definition
-        resp = client.get(listing_url, headers=HEADERS, timeout=15)
-        if resp.status_code != 200:
-            return None
-
-        soup = BeautifulSoup(resp.text, "lxml")
-        tag = soup.find("script", id="__NEXT_DATA__")
-        if not tag:
-            return None
-
-        page_data = json.loads(tag.string)
-
-        # Navigate the multi-branch hydration tree down to the main listing schema block
-        page_props = page_data.get("props", {}).get("pageProps", {})
-
-        # Priority path 1: Directly inside the targeted snapshot block details
-        listing_details = page_props.get("listingDetails", {})
-        if listing_details and isinstance(listing_details, dict):
-            desc = listing_details.get("description")
-            if desc:
-                return desc
-
-        # Priority path 2: Deep nested alternative layout parameters tree
-        hero_data = (
-            page_props
-            .get("initialData", {})
-            .get("listingHero", {})
-            .get("listingHeroDetails", {})
-        )
-        if hero_data and isinstance(hero_data, dict):
-            desc = hero_data.get("description")
-            if desc:
-                return desc
-
-    except Exception as e:
-        logger.error("Failed executing deep description fetch on AutoTrader VIP %s: %s", listing_url, e)
-    return None
 
 def normalize(raw: dict) -> dict | None:
     source_id = str(raw.get("id") or raw.get("identifier") or "")
@@ -262,14 +186,11 @@ def normalize(raw: dict) -> dict | None:
     special = raw.get("specialConditions") or []
     damaged = any("damage" in str(s).lower() or "salvage" in str(s).lower() for s in special)
 
-    fingerprint = _make_fingerprint(year, make, model, mileage, location)
-
     return {
         "source": "autotrader",
         "source_id": source_id,
         "url": listing_url,
         "vin": vin,
-        "fingerprint": fingerprint,
 
         "title": f"{year} {make} {model}".strip(),
         "make": make,
@@ -346,16 +267,12 @@ def run(
 
             new_on_page = 0
             for listing in listings:
-                if listing is None:
-                    continue
-
-                # Zero-Risk Approach: Don't fetch secondary pages.
-                # Just clean out the bad linebreaks and formatting artifacts on the text we have.
                 if listing["source_id"] not in known_ids:
                     new_on_page += 1
 
-                desc = listing.get("description") or ""
-                listing["description"] = clean_at_description(desc)
+                # Don't fetch detail pages; just flatten line breaks/bullets
+                # in the description we already have.
+                listing["description"] = clean_description(listing.get("description"))
 
                 yield listing
 
@@ -375,7 +292,6 @@ if __name__ == "__main__":
 
     if results:
         sample = results[0]
-        import json
         print("\nFirst listing:")
         print(json.dumps({
             "source_id": sample["source_id"],
