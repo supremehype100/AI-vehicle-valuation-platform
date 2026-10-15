@@ -1,8 +1,13 @@
+"""
+Facebook.py
+
+Scrapes Facebook Marketplace vehicle listings through a persistent, already
+logged-in Chromium profile (see docs/RUNBOOK.md). The profile directory is
+git-ignored and must never be committed.
+"""
 import asyncio
-import hashlib
 import logging
 import random
-import sys
 import re
 from pathlib import Path
 from Features import is_valid_price
@@ -12,22 +17,12 @@ from config import (
     FB_PAGE_LOAD_WAIT_MIN_MS,
     FB_PAGE_LOAD_WAIT_MAX_MS,
 )
-from classification.classify import DEALER_NAME_RE, DEALER_DESC_RE, dealer_match_reason
+from classification.classify import dealer_match_reason
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
 logger = logging.getLogger(__name__)
 
-CHROME_USER_DATA = r"./fb_chrome_profile_fresh"
-CHROME_PROFILE = "Default"
+CHROME_USER_DATA = "./fb_chrome_profile_fresh"
 TARGET_URL = "https://www.facebook.com/marketplace/calgary/search?topLevelVehicleType=car_truck&query=Vehicles&category_id=546583916084032&exact=false&referral_ui_component=category_menu_item"
-
-Path(CHROME_USER_DATA).mkdir(parents=True, exist_ok=True)
-
-DISCOVERED_LISTING_IDS = set()
 
 VIN_RE = re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b')
 
@@ -47,10 +42,6 @@ VALID_MAKES = {
 }
 
 SORTED_MAKES = sorted(list(VALID_MAKES), key=len, reverse=True)
-
-
-def _check_dealer_match(seller_name: str | None, description: str | None) -> str | None:
-    return dealer_match_reason(seller_name, description)
 
 
 def _extract_year_make_model(title: str) -> tuple[int | None, str | None, str | None]:
@@ -107,80 +98,6 @@ def _extract_year_make_model(title: str) -> tuple[int | None, str | None, str | 
 
     return year, detected_make, model.title()
 
-def parse_raw_listing(extracted: dict) -> dict | None:
-    title = extracted.get("title", "")
-    description = extracted.get("description", "")
-    seller_name = extracted.get("seller_name", "")
-    listing_id = extracted.get("id", "Unknown")
-
-    raw_price = extracted.get("price")
-    price = None
-    if raw_price is not None:
-        try:
-            if isinstance(raw_price, (int, float)):
-                price = float(raw_price)
-            else:
-                cleaned_price_str = re.sub(r'[^\d.]', '', str(raw_price))
-                price = float(cleaned_price_str) if cleaned_price_str else None
-        except (ValueError, TypeError):
-            price = None
-
-    if not is_valid_price(price):
-        logger.info(" Dropped listing ID %s: Invalid price value detected (Raw: '%s', Parsed: %s)", listing_id,
-                    raw_price, price)
-        return None
-
-    if re.search(r'\bparts?\b', title, re.IGNORECASE):
-        logger.info(" Dropped listing ID %s: Title contains parts/salvage keywords ('%s')", listing_id, title)
-        return None
-
-    # Dealer listings are no longer discarded here — they're kept and routed
-    # to the dealer dataset (see classification/classify.py + Ingest.py)
-    # instead of being thrown away. We still tag *why* for observability.
-    dealer_reason = _check_dealer_match(seller_name, description)
-    seller_type = "dealer" if dealer_reason else "private"
-    if dealer_reason:
-        logger.info(" Listing ID %s flagged as dealer (kept, routed to dealer dataset). Reason: %s",
-                    listing_id, dealer_reason)
-
-    year, make, model = _extract_year_make_model(title)
-
-    if not year or not make:
-        reasons = []
-        if not year: reasons.append("Missing or unparseable production year")
-        if not make: reasons.append("No supported automaker brand match detected")
-        logger.info(" Dropped listing ID %s: Structural check failed (%s). Title was: '%s'", listing_id,
-                    " & ".join(reasons), title)
-        return None
-
-    raw_mileage = extracted.get("mileage", "")
-    mileage = None
-    if raw_mileage and raw_mileage != "Not Listed":
-        try:
-            cleaned_mileage_str = re.sub(r'[^\d]', '', str(raw_mileage))
-            if cleaned_mileage_str:
-                mileage = int(cleaned_mileage_str)
-        except Exception as e:
-            logger.info(" Mileage conversion failed crashed on string %r: %s", raw_mileage, e)
-            mileage = None
-
-    return {
-        "source": "facebook",
-        "source_id": listing_id,
-        "title": title,
-        "price": price,
-        "year": year,
-        "make": make,
-        "model": model,
-        "mileage": mileage,
-        "description": description,
-        "seller_name": seller_name,
-        "seller_type": seller_type,
-        "raw_json": extracted,
-        "status": extracted.get("status", "active")
-    }
-
-
 def _extract_vin(text: str | None) -> str | None:
     if not text:
         return None
@@ -188,47 +105,45 @@ def _extract_vin(text: str | None) -> str | None:
     return m.group(0) if m else None
 
 
-def _make_fingerprint(year, make, model, mileage, city) -> str | None:
-    if not all([year, make, model]):
-        return None
-    bucket = round((mileage or 0) / 500) * 500
-    key = f"{year}:{str(make).lower()}:{str(model).lower()}:{bucket}:{str(city or '').lower()}"
-    return hashlib.md5(key.encode()).hexdigest()
-
-
 def normalize_visible(extracted: dict, listing_id: str) -> dict | None:
+    """Turn the text scraped from one listing page into an Ingest-ready dict,
+    or None (with the reason logged) if it should be dropped."""
     title = extracted.get("title", "")
     if re.search(r'\bparts?\b', title, re.IGNORECASE):
-        logger.info("❌ normalize_visible skipped ID %s: Title contains parts keywords.", listing_id)
+        logger.info("Skipped listing %s: title contains parts keywords ('%s').", listing_id, title)
         return None
 
     description = extracted.get("description", "")
     seller_name = extracted.get("seller_name", "")
 
     # Dealer listings are kept (routed to the dealer dataset), not dropped.
-    dealer_reason = _check_dealer_match(seller_name, description)
+    dealer_reason = dealer_match_reason(seller_name, description)
     seller_type = "dealer" if dealer_reason else "private"
+    if dealer_reason:
+        logger.info("Listing %s flagged as dealer (kept). Reason: %s", listing_id, dealer_reason)
 
-    price_str = extracted.get("price", "")
+    price_str = str(extracted.get("price") or "")
+    cleaned_price = re.sub(r'[^\d.]', '', price_str)
     try:
-        price = float(re.sub(r'[^\d.]', '', price_str)) if price_str else None
-        price = price if price and price > 0 else None
+        price = float(cleaned_price) if cleaned_price else None
     except ValueError:
         price = None
 
     if not is_valid_price(price):
-        logger.info("❌ normalize_visible skipped ID %s: Price out of bounds (%s).", listing_id, price_str)
+        logger.info("Skipped listing %s: invalid price (raw: '%s', parsed: %s).", listing_id, price_str, price)
         return None
 
-    mileage_str = extracted.get("mileage", "")
-    try:
-        mileage = int(re.sub(r'\D', '', mileage_str)) if mileage_str else None
-    except ValueError:
-        mileage = None
+    mileage_digits = re.sub(r'\D', '', str(extracted.get("mileage") or ""))
+    mileage = int(mileage_digits) if mileage_digits else None
 
     year, make, model = _extract_year_make_model(title)
     if not year or not make:
-        logger.info("❌ normalize_visible skipped ID %s: Missing year/make identifiers ('%s').", listing_id, title)
+        reasons = []
+        if not year:
+            reasons.append("missing or unparseable production year")
+        if not make:
+            reasons.append("no supported automaker brand match")
+        logger.info("Skipped listing %s: %s. Title was: '%s'", listing_id, " & ".join(reasons), title)
         return None
 
     return {
@@ -236,7 +151,6 @@ def normalize_visible(extracted: dict, listing_id: str) -> dict | None:
         "source_id": listing_id,
         "url": f"https://www.facebook.com/marketplace/item/{listing_id}",
         "vin": _extract_vin(description),
-        "fingerprint": _make_fingerprint(year, make, model, mileage, extracted.get("location")),
         "title": title,
         "make": make,
         "model": model,
@@ -264,7 +178,7 @@ def normalize_visible(extracted: dict, listing_id: str) -> dict | None:
 
 async def extract_visible_details(page, listing_id):
     url = f"https://www.facebook.com/marketplace/item/{listing_id}/"
-    print(f"\n🔎 Extracting visible elements for ID: {listing_id}...")
+    logger.info("Extracting visible elements for listing %s", listing_id)
 
     extracted_data = {
         "title": "Unknown Vehicle",
@@ -351,7 +265,7 @@ async def extract_visible_details(page, listing_id):
         specs_match = re.search(r'Driven\s+([\d,]+\s*(?:km|miles|k))', page_text, re.IGNORECASE)
         strict_desc_match = re.search(r'\b(\d{1,3}[,\s]\d{3}|\d{4,6})\s*(?:km|kms|miles)\b',
                                       extracted_data["description"], re.IGNORECASE)
-        k_desc_match = re.search(r'\b(\d{2,3}\s*k\b\s*(?:km)?)\b', extracted_data["description"], re.IGNORECASE)
+        k_desc_match = re.search(r'\b(\d{2,3})\s*k\b', extracted_data["description"], re.IGNORECASE)
         loose_raw_match = re.search(r'\b(\d{3}[,\s]\d{3})\s*km\b', page_text, re.IGNORECASE)
 
         if specs_match:
@@ -359,7 +273,7 @@ async def extract_visible_details(page, listing_id):
         elif strict_desc_match:
             extracted_data["mileage"] = f"{strict_desc_match.group(1).strip()} km"
         elif k_desc_match:
-            extracted_data["mileage"] = k_desc_match.group(1).strip().lower().replace("k", ",000 km")
+            extracted_data["mileage"] = f"{int(k_desc_match.group(1)) * 1000} km"
         elif loose_raw_match:
             extracted_data["mileage"] = f"{loose_raw_match.group(1).strip()} km"
 
@@ -368,68 +282,23 @@ async def extract_visible_details(page, listing_id):
             extracted_data["mileage"] = "Not Listed"
 
     except Exception as e:
-        print(f" Element parsing error on ID {listing_id}: {e}")
+        logger.warning("Element parsing error on listing %s: %s", listing_id, e)
     return extracted_data
 
 
-async def run_scraper(target_url: str | None = None):
-    from playwright.async_api import async_playwright
-    if target_url is None:
-        target_url = TARGET_URL
-    async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=str(Path(CHROME_USER_DATA).resolve()),
-            headless=False,
-            ignore_default_args=["--enable-automation"],
-            # ⬇️ TWEAKED ARGS: Added focus prevention flags ⬇️
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-startup-window",  # Spawns window in the background
-                "--inactive"            # Tells the OS not to bring this window to the foreground
-            ],
-            viewport={"width": 1920, "height": 1080},
-            locale="en-CA",
-            timezone_id="America/Edmonton"
-        )
-
-        page = context.pages[0] if context.pages else await context.new_page()
-        await page.goto(target_url, wait_until="domcontentloaded")
-        await page.wait_for_timeout(5000)
-
-        links = await page.query_selector_all("a[href*='/marketplace/item/']")
-        for link in links:
-            href = await link.get_attribute("href")
-            if href:
-                match = re.search(r'/item/(\d+)', href)
-                if match:
-                    DISCOVERED_LISTING_IDS.add(match.group(1))
-
-        target_queue = list(DISCOVERED_LISTING_IDS)[:4]
-        for index, item_id in enumerate(target_queue, 1):
-            await extract_visible_details(page, item_id)
-            # Pause between checking listings — configurable, see config.py.
-            await asyncio.sleep(random.uniform(FB_LISTING_DELAY_MIN_SECONDS, FB_LISTING_DELAY_MAX_SECONDS))
-
-        await context.close()
-
-
-def run(max_listings: int = 30, known_ids: set[str] | None = None, dealer_ids: set[str] | None = None,
-        target_url: str | None = None):
+def run(max_listings: int = 30, known_ids: set[str] | None = None, target_url: str | None = None):
     known_ids = known_ids or set()
-    dealer_ids = dealer_ids or set()
-    url_to_scrape = target_url or TARGET_URL
-
-    results = asyncio.run(_run_and_collect(max_listings=max_listings, target_url=url_to_scrape))
+    results = asyncio.run(_run_and_collect(max_listings=max_listings, target_url=target_url or TARGET_URL))
 
     for listing in results:
-        if listing and listing["source_id"] not in known_ids:
-            if listing.get("seller_id") not in dealer_ids:
-                yield listing
+        if listing["source_id"] not in known_ids:
+            yield listing
 
 
 async def _run_and_collect(max_listings: int, target_url: str) -> list[dict]:
     from playwright.async_api import async_playwright
     collected = []
+    Path(CHROME_USER_DATA).mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
@@ -467,29 +336,17 @@ async def _run_and_collect(max_listings: int, target_url: str) -> list[dict]:
                 break
 
             extracted = await extract_visible_details(page, listing_id)
-            if extracted:
-                extracted["id"] = listing_id
-                clean_listing = parse_raw_listing(extracted)
-                if clean_listing:
-                    print("=" * 70)
-                    print(f" VEHICLE ACCEPTED: {clean_listing['title']}")
-                    print(f" PRICE:              ${clean_listing['price']}")
-                    print(f" YEAR:               {clean_listing['year']}")
-                    print(f" MAKE:               {clean_listing['make']}")
-                    print(f" MODEL:              {clean_listing['model']}")
-                    print(f" MILEAGE:            {clean_listing['mileage']} km" if clean_listing[
-                        'mileage'] else " MILEAGE:            Not Listed")
-                    print(f" SELLER:             {clean_listing['seller_name']}")
-                    print("=" * 70)
-
-                    collected.append(clean_listing)
+            clean_listing = normalize_visible(extracted, listing_id)
+            if clean_listing:
+                logger.info(
+                    "Accepted %s %s %s | $%s | %s km",
+                    clean_listing["year"], clean_listing["make"], clean_listing["model"],
+                    clean_listing["price"], clean_listing["mileage"] or "unknown",
+                )
+                collected.append(clean_listing)
 
             # Pause between checking listings — configurable, see config.py.
             await asyncio.sleep(random.uniform(FB_LISTING_DELAY_MIN_SECONDS, FB_LISTING_DELAY_MAX_SECONDS))
         await context.close()
 
     return collected
-
-
-if __name__ == "__main__":
-    asyncio.run(run_scraper())
