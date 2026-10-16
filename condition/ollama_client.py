@@ -92,7 +92,6 @@ def _build_user_content(description: str, image_b64_list: list[str]) -> str:
 
 def _post_chat(payload: dict) -> httpx.Response:
     url = f"{OLLAMA_HOST}/api/chat"
-    print(f"DEBUG: Backfill script is trying to connect to: {url}")
     with httpx.Client(timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS) as client:
         return client.post(url, json=payload)
 
@@ -131,7 +130,7 @@ def extract_condition(description: str, image_b64_list: list[str]) -> ConditionA
             "num_ctx": OLLAMA_NUM_CTX,
         },
         "stream": False,
-        "think" : False
+        "think": False,
     }
 
     last_error: Exception | None = None
