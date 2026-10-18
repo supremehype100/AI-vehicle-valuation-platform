@@ -2,16 +2,22 @@
 run.py — Main entry point.
 
 Commands:
-    python run.py scrape        — scrape Kijiji, AutoTrader, Facebook
-    python run.py bulk          — scrape all pages from all sources
-    python run.py sold_sweep    — mark removed listings
-    python run.py train         — train the price model
-    python run.py value         — interactive valuation prompt
-    python run.py pipeline      — scrape + train in one shot
-    python run.py status        — show DB stats
+    python run.py scrape [pages]       — scrape Kijiji and AutoTrader
+    python run.py scrape_fast [pages]  — quick scrape (default 1 page)
+    python run.py bulk [pages]         — scrape all pages from all sources
+    python run.py scrape_facebook      — scrape Facebook Marketplace feeds
+    python run.py scrape_statvin [n]   — scrape stat.vin salvage listings
+    python run.py sold_sweep           — mark removed listings
+    python run.py train                — train the price model
+    python run.py value                — interactive valuation prompt
+    python run.py pipeline [pages]     — scrape + train in one shot
+    python run.py status               — show DB stats
+    (see COMMANDS below for the backfill, training and comparison commands)
 """
 
 from __future__ import annotations
+import os
+import random
 import sys
 import logging
 import time
@@ -22,169 +28,63 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+PERSONAL_CSV = "vehicles_cleaned.csv"
 
-def get_fb_dealer_ids(session) -> set[str]:
-    from sqlalchemy import text
-    rows = session.execute(text("""
-        SELECT seller_id FROM listings
-        WHERE source = 'facebook'
-        AND seller_id IS NOT NULL
-        AND status = 'active'
-        AND make IS NOT NULL
-        GROUP BY seller_id
-        HAVING COUNT(DISTINCT source_id) >= 2
-    """)).fetchall()
-    return {r[0] for r in rows}
 FB_TARGET_URLS = [
-        "https://www.facebook.com/marketplace/calgary/search?topLevelVehicleType=car_truck&query=Vehicles&category_id=546583916084032&exact=false&referral_ui_component=category_menu_item",  # Cars/Trucks
-        "https://www.facebook.com/marketplace/?ref=app_tab",
-        "https://www.facebook.com/marketplace/calgary/search?availability=in%20stock&query=cars&exact=false",
-        "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=cars&exact=false",
-        "https://www.facebook.com/marketplace/calgary/search/?query=toyota",
-        "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=toyota&exact=false",
-        "https://www.facebook.com/marketplace/calgary/search?availability=in%20stock&query=honda&exact=false",
-        "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=honda&exact=false",
-        "https://www.facebook.com/marketplace/calgary/search?availability=in%20stock&query=chevrolet&exact=false",
-        "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=chevrolet&exact=false",
-        "https://www.facebook.com/marketplace/calgary/search?availability=in%20stock&query=suv&exact=false",
-        "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=suv&exact=false",
+    "https://www.facebook.com/marketplace/calgary/search?topLevelVehicleType=car_truck&query=Vehicles&category_id=546583916084032&exact=false&referral_ui_component=category_menu_item",  # Cars/Trucks
+    "https://www.facebook.com/marketplace/?ref=app_tab",
+    "https://www.facebook.com/marketplace/calgary/search?availability=in%20stock&query=cars&exact=false",
+    "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=cars&exact=false",
+    "https://www.facebook.com/marketplace/calgary/search/?query=toyota",
+    "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=toyota&exact=false",
+    "https://www.facebook.com/marketplace/calgary/search?availability=in%20stock&query=honda&exact=false",
+    "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=honda&exact=false",
+    "https://www.facebook.com/marketplace/calgary/search?availability=in%20stock&query=chevrolet&exact=false",
+    "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=chevrolet&exact=false",
+    "https://www.facebook.com/marketplace/calgary/search?availability=in%20stock&query=suv&exact=false",
+    "https://www.facebook.com/marketplace/calgary/search?availability=out%20of%20stock&query=suv&exact=false",
+]
 
 
-    ]
+def _print_counts(label: str, counts: dict):
+    print(f"{label:<11}— New: {counts['new']} | Updated: {counts['updated']} | Errors: {counts['errors']}")
+
 
 def cmd_scrape(max_pages: int = 5, bulk: bool = False):
+    """Scrape Kijiji and AutoTrader. With bulk=True, ignore already-known ids
+    so every page is fully processed."""
     from Session import create_tables, get_session
     from Ingest import upsert_batch, get_known_ids
     from kijiji import run as kijiji_run
     from Autotrader import run as autotrader_run
-    from Facebook import run as facebook_run
-    from concurrent.futures import ThreadPoolExecutor
 
     create_tables()
 
-    with get_session() as session:
-        known_kijiji = set() if bulk else get_known_ids("kijiji", session)
-        known_autotrader = set() if bulk else get_known_ids("autotrader", session)
-        known_facebook = set() if bulk else get_known_ids("facebook", session)
-        dealer_ids = get_fb_dealer_ids(session)
-
-    # ------------------------------------------------------------------
-    # Kijiji + AutoTrader — sequential within this worker, but this whole
-    # worker runs concurrently with the Facebook worker below since it's
-    # much faster and doesn't touch a browser session at all.
-    # ------------------------------------------------------------------
-    def run_kijiji_autotrader():
-        kijiji_listings = list(kijiji_run(max_pages=max_pages, known_ids=known_kijiji))
-        logger.info("Scraped %d listings from Kijiji", len(kijiji_listings))
+    for label, source, scrape in (
+        ("Kijiji", "kijiji", kijiji_run),
+        ("AutoTrader", "autotrader", autotrader_run),
+    ):
         with get_session() as session:
-            kc = upsert_batch(kijiji_listings, session)
-        print(f"\nKijiji     — New: {kc['new']} | Updated: {kc['updated']} | Errors: {kc['errors']}")
-
-        at_listings = list(autotrader_run(max_pages=max_pages, known_ids=known_autotrader))
-        logger.info("Scraped %d listings from AutoTrader", len(at_listings))
+            known_ids = set() if bulk else get_known_ids(source, session)
+        listings = list(scrape(max_pages=max_pages, known_ids=known_ids))
+        logger.info("Scraped %d listings from %s", len(listings), label)
         with get_session() as session:
-            ac = upsert_batch(at_listings, session)
-        print(f"AutoTrader — New: {ac['new']} | Updated: {ac['updated']} | Errors: {ac['errors']}")
+            counts = upsert_batch(listings, session)
+        _print_counts(label, counts)
 
-    # ------------------------------------------------------------------
-    # Facebook — single sequential pass over all target feeds (these still
-    # run one-at-a-time against each other, since they share one headed
-    # Chrome profile; only the OUTER kijiji/autotrader work is parallelized
-    # against this whole block).
-    # ------------------------------------------------------------------
-    '''def run_facebook():
-        target_limit = 50  # You can hardcode 7 here, or use: max_pages * 3
-
-        fb_start_time = time.time()
-        logger.info("Starting Facebook scraping pipeline across all target feeds...")
-
-        total_fb_new = 0
-        total_fb_updated = 0
-        total_fb_errors = 0
-
-        for index, url in enumerate(FB_TARGET_URLS, 1):
-            logger.info(f"Scraping Facebook Feed {index}/{len(FB_TARGET_URLS)}...")
-
-            try:
-                fb_listings = list(facebook_run(
-                    known_ids=known_facebook,
-                    dealer_ids=dealer_ids,
-                    target_url=url,
-                    max_listings=target_limit
-                ))
-
-                with get_session() as session:
-                    fc = upsert_batch(fb_listings, session)
-
-                print(f"Facebook Feed {index} — New: {fc['new']} | Updated: {fc['updated']} | Errors: {fc['errors']}")
-
-                total_fb_new += fc["new"]
-                total_fb_updated += fc["updated"]
-                total_fb_errors += fc["errors"]
-
-            except Exception as e:
-                logger.error(f"Critical error on Facebook Feed {index}: {e}")
-                total_fb_errors += 1
-
-        fb_end_time = time.time()
-        elapsed_seconds = fb_end_time - fb_start_time
-        elapsed_minutes = elapsed_seconds / 60
-
-        remaining_minutes = 30.0 - elapsed_minutes
-        safety_margin_pct = (remaining_minutes / 30.0) * 100
-
-        print(f"\n{'═' * 55}")
-        print(f"  FACEBOOK PIPELINE COMPLETION REPORT")
-        print(f"{'─' * 55}")
-        print(f"  Total Duration:     {elapsed_minutes:.2f} minutes ({int(elapsed_seconds)}s)")
-        print(f"  Next Cycle Buffer:  {remaining_minutes:.2f} minutes left before cron restart")
-        print(f"  Safety Margin:      {safety_margin_pct:.1f}% space remaining")
-        print(f"  Metrics Aggregate:  New: {total_fb_new} | Updated: {total_fb_updated} | Errors: {total_fb_errors}")
-        print(f"{'═' * 55}\n")
-
-        if remaining_minutes <= 5.0:
-            logger.warning(
-                " DANGER ZONE: Facebook scraper is taking more than 25 minutes! It might overlap with the next cron job.")
-        else:
-            logger.info(" SUCCESS: Scraper completed with a healthy safety margin.")
-'''
-    # Run Kijiji+AutoTrader and the Facebook pipeline at the same time.
-    # Kijiji/AutoTrader will almost certainly finish first and print their
-    # results early; the Facebook report prints whenever that thread finishes.
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_fast = pool.submit(run_kijiji_autotrader)
-        #fut_fb = pool.submit(run_facebook)
-
-        # Surface any exception from either thread instead of swallowing it
-        fut_fast.result()
-        #fut_fb.result()
 
 def cmd_scrape_fast(max_pages: int = 1):
-    """Quick scrape — Kijiji + AutoTrader only, no Facebook."""
-    from Session import create_tables, get_session
-    from Ingest import upsert_batch, get_known_ids
-    from kijiji import run as kijiji_run
-    from Autotrader import run as autotrader_run
+    """Quick scrape — Kijiji + AutoTrader only, page 1 by default."""
+    cmd_scrape(max_pages=max_pages)
 
-    create_tables()
 
-    with get_session() as session:
-        known_kijiji = get_known_ids("kijiji", session)
-        known_autotrader = get_known_ids("autotrader", session)
+def cmd_bulk(max_pages: int = 100):
+    cmd_scrape(max_pages=max_pages, bulk=True)
 
-    kijiji_listings = list(kijiji_run(max_pages=max_pages, known_ids=known_kijiji))
-    with get_session() as session:
-        kc = upsert_batch(kijiji_listings, session)
-    print(f"Kijiji     — New: {kc['new']} | Updated: {kc['updated']} | Errors: {kc['errors']}")
 
-    at_listings = list(autotrader_run(max_pages=max_pages, known_ids=known_autotrader))
-    with get_session() as session:
-        ac = upsert_batch(at_listings, session)
-    print(f"AutoTrader — New: {ac['new']} | Updated: {ac['updated']} | Errors: {ac['errors']}")
-def cmd_bulk():
-    cmd_scrape(max_pages=100, bulk=True)
-
-'''def cmd_scrape_facebook(max_listings: int = 7):
+def cmd_scrape_facebook(max_listings: int = 7):
+    """Scrape every Facebook Marketplace feed in FB_TARGET_URLS, one at a time
+    (they share a single headed Chrome profile)."""
     from Session import create_tables, get_session
     from Ingest import upsert_batch, get_known_ids
     from Facebook import run as facebook_run
@@ -192,20 +92,21 @@ def cmd_bulk():
     create_tables()
 
     with get_session() as session:
-        known_facebook = get_known_ids("facebook", session)
-        dealer_ids = get_fb_dealer_ids(session)
+        known_ids = get_known_ids("facebook", session)
 
-    for url in FB_TARGET_URLS:
-        fb_listings = list(facebook_run(
-            known_ids=known_facebook,
-            dealer_ids=dealer_ids,
-            max_listings=max_listings,
-            target_url=url,
-        ))
-        with get_session() as session:
-            fc = upsert_batch(fb_listings, session)
-        print(f"Facebook   — New: {fc['new']} | Updated: {fc['updated']} | Errors: {fc['errors']}")
-        '''
+    for index, url in enumerate(FB_TARGET_URLS, 1):
+        logger.info("Scraping Facebook feed %d/%d", index, len(FB_TARGET_URLS))
+        try:
+            listings = list(facebook_run(known_ids=known_ids, max_listings=max_listings, target_url=url))
+            with get_session() as session:
+                counts = upsert_batch(listings, session)
+        except Exception:
+            logger.exception("Facebook feed %d failed", index)
+            continue
+        known_ids.update(l["source_id"] for l in listings)
+        _print_counts(f"Facebook {index}", counts)
+
+
 def cmd_sold_sweep():
     from Session import get_session
     from Ingest import sold_sweep
@@ -221,7 +122,7 @@ def cmd_sold_sweep():
         kc = sold_sweep("kijiji", kijiji_seen, session)
         ac = sold_sweep("autotrader", at_seen, session)
 
-    print(f"\nSold sweep complete:")
+    print("\nSold sweep complete:")
     print(f"  Kijiji removed:     {kc['removed']}")
     print(f"  AutoTrader removed: {ac['removed']}")
 
@@ -229,9 +130,8 @@ def cmd_sold_sweep():
 def cmd_train():
     from Session import get_session
     from Model import train
-    import os
 
-    cv_path = "vehicles_cleaned.csv" if os.path.exists("vehicles_cleaned.csv") else None
+    cv_path = PERSONAL_CSV if os.path.exists(PERSONAL_CSV) else None
     if cv_path:
         print("Using personal CSV as validation set")
 
@@ -242,7 +142,7 @@ def cmd_train():
             print(f"\n{e}")
             return
 
-    print(f"\nModel trained:")
+    print("\nModel trained:")
     print(f"  Samples:       {meta['training_samples']}")
     print(f"  MAE:           ${meta['mae']:,.0f}")
     print(f"  R²:            {meta['r2']}")
@@ -256,8 +156,12 @@ def cmd_value():
     print("\n=== Vehicle Valuation ===")
     make = input("Make (e.g. toyota): ").strip()
     model_name = input("Model (e.g. camry): ").strip()
-    year = int(input("Year (e.g. 2019): ").strip())
-    mileage = int(input("Mileage in km (e.g. 80000): ").strip())
+    try:
+        year = int(input("Year (e.g. 2019): ").strip())
+        mileage = int(input("Mileage in km (e.g. 80000): ").strip().replace(",", ""))
+    except ValueError:
+        print("\nYear and mileage must be whole numbers.")
+        return
     trim = input("Trim (optional, press Enter to skip): ").strip() or None
 
     with get_session() as session:
@@ -310,15 +214,15 @@ def cmd_status():
             "GROUP BY make ORDER BY n DESC LIMIT 10"
         )).fetchall()
 
-    print(f"\n=== DB Status ===")
+    print("\n=== DB Status ===")
     print(f"  Total listings:     {total:,}")
     print(f"  With price:         {with_price:,}")
     print(f"  With make/model:    {with_make:,}")
     print(f"  Snapshots:          {snapshots:,}")
-    print(f"\nBy source:")
+    print("\nBy source:")
     for source, count in sources:
         print(f"  {source:<20} {count:>6}")
-    print(f"\nTop makes:")
+    print("\nTop makes:")
     for make, count in makes:
         print(f"  {make:<20} {count:>5}")
 
@@ -329,8 +233,6 @@ def cmd_backfill_descriptions():
     from kijiji import fetch_full_description, clean_description
     from sqlalchemy import text
     import httpx
-    import time
-    import random
 
     logger.info("Initializing historical Kijiji description backfill sweep...")
 
@@ -377,7 +279,6 @@ def cmd_backfill_descriptions():
                              """),
                         {"desc": cleaned_desc, "sid": source_id}
                     )
-                    session.commit()
 
                 updated_count += 1
                 logger.info(f"Successfully backfilled ID {source_id}.")
@@ -438,9 +339,8 @@ def cmd_train_private_csv():
     """Model 1 — private listings, existing personal-CSV validation baseline (unmodified)."""
     from Session import get_session
     from training.private_csv import run as train_private_csv
-    import os
 
-    cv_path = "vehicles_cleaned.csv" if os.path.exists("vehicles_cleaned.csv") else None
+    cv_path = PERSONAL_CSV if os.path.exists(PERSONAL_CSV) else None
     with get_session() as session:
         result = train_private_csv(session, cv_csv_path=cv_path)
     _print_train_result("Model 1 (private_csv)", result["meta"])
@@ -541,7 +441,7 @@ COMMANDS = {
     "pipeline":    cmd_pipeline,
     "status":      cmd_status,
     "scrape_fast": cmd_scrape_fast,
-    #"scrape_facebook": cmd_scrape_facebook,
+    "scrape_facebook": cmd_scrape_facebook,
     "scrape_statvin": cmd_scrape_statvin,
     "backfill_kijiji": cmd_backfill_descriptions,
     "backfill_conditions": cmd_backfill_conditions,
@@ -561,7 +461,7 @@ if __name__ == "__main__":
         print(f"Available: {', '.join(COMMANDS)}")
         sys.exit(1)
 
-    if cmd in ("scrape", "pipeline", "bulk", "scrape_statvin") and len(sys.argv) > 2:
+    if cmd in ("scrape", "scrape_fast", "pipeline", "bulk", "scrape_statvin") and len(sys.argv) > 2:
         COMMANDS[cmd](max_pages=int(sys.argv[2]))
     else:
         COMMANDS[cmd]()
