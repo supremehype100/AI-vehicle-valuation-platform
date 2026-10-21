@@ -1,9 +1,10 @@
 """
-scheduler.py
+Scheduler.py
 
 Parallel Schedule:
   Every 1 minute (8am-10pm) — quick scrape page 1 of Kijiji + AutoTrader (blocking, fast)
-  Every 3 hours (8am-10pm)  — Facebook scrape runs in background
+  Every 3 hours (8am-10pm)  — Facebook scrape runs in background (opt-in: set
+                                 ENABLE_FACEBOOK_SCHEDULE=true)
   Every day 6:00 AM         — full bulk maintenance sweep:
                                  bulk scrape -> sold sweep -> stat.vin salvage scrape
                                  -> AI condition backfill (GPU/Ollama, runs once here only)
@@ -11,12 +12,14 @@ Parallel Schedule:
                                  dealer_traintest, salvage_traintest) via train_all
 """
 
+import os
 import sys
 import time
 import threading
 import logging
 import subprocess
 from datetime import datetime, timedelta
+from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,7 +29,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 PYTHON = sys.executable
-RUN_SCRIPT = "run.py"
+RUN_SCRIPT = str(Path(__file__).resolve().with_name("run.py"))
+ENABLE_FACEBOOK_SCHEDULE = os.environ.get("ENABLE_FACEBOOK_SCHEDULE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 # -----------------------------
@@ -55,7 +59,7 @@ def fast_worker():
 # -----------------------------
 # 2. FACEBOOK LOOP (3-hour cycle)
 # -----------------------------
-#def facebook_worker():
+def facebook_worker():
     while True:
         now = datetime.now()
 
@@ -149,13 +153,12 @@ def maintenance_worker():
 if __name__ == "__main__":
     logger.info("Starting parallel scraper system...")
 
-    t1 = threading.Thread(target=fast_worker, daemon=True)
-    #t2 = threading.Thread(target=facebook_worker, daemon=True)
-    t3 = threading.Thread(target=maintenance_worker, daemon=True)
+    workers = [fast_worker, maintenance_worker]
+    if ENABLE_FACEBOOK_SCHEDULE:
+        workers.append(facebook_worker)
 
-    t1.start()
-    #t2.start()
-    t3.start()
+    for worker in workers:
+        threading.Thread(target=worker, daemon=True).start()
 
     # keep main thread alive
     while True:
