@@ -7,7 +7,6 @@ arrays, hand-computed expected values. No DB, no network.
 
 import math
 
-import numpy as np
 import pytest
 
 from training.metrics import compute_metrics

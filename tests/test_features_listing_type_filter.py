@@ -6,7 +6,6 @@ This asserts the SQL filter is actually present in the query construction.
 """
 from unittest.mock import MagicMock
 import Features
-from models import Listing
 
 
 def test_default_listing_type_filters_to_private():

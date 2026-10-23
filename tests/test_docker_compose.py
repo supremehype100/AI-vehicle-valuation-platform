@@ -6,7 +6,6 @@ YAML, define the expected services, never auto-run a job on `up`, and the GPU
 reservation / CPU-fallback override are structurally present.
 """
 import yaml
-import pytest
 
 
 def _load(path):
