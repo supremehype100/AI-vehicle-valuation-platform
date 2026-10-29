@@ -15,12 +15,26 @@ but are NOT exercised against a real database by this package's test suite.
 DB integration is unverified here — flagged explicitly in the task report.
 """
 
+import math
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models import ModelArtifact
+
+
+def _json_safe(value):
+    """Replace NaN/inf floats with None, recursively. Postgres JSONB rejects
+    the bare NaN token Python's json module would otherwise emit (e.g. r2 on
+    a constant-target validation set)."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def register_model(
@@ -64,7 +78,7 @@ def register_model(
         split_strategy=split_strategy,
         feature_list=list(feature_list) if feature_list is not None else [],
         model_config=dict(model_config) if model_config is not None else {},
-        metrics=dict(metrics) if metrics is not None else {},
+        metrics=_json_safe(metrics) if metrics is not None else {},
         notes=notes,
     )
     session.add(artifact)
