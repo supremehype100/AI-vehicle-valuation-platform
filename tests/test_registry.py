@@ -102,3 +102,14 @@ def test_list_versions_queries_all_matching_model_key_newest_first():
     where_clause = session.execute.call_args[0][0]
     compiled = str(where_clause.compile(compile_kwargs={"literal_binds": True}))
     assert "'dealer_traintest'" in compiled
+
+
+def test_register_model_replaces_nan_metrics_with_none():
+    session = MagicMock()
+    artifact = registry.register_model(
+        session,
+        model_key="private_traintest",
+        artifact_path="/models/x.pkl",
+        metrics={"mae": 1200.5, "r2": float("nan"), "error_distribution": {"p90": float("inf")}},
+    )
+    assert artifact.metrics == {"mae": 1200.5, "r2": None, "error_distribution": {"p90": None}}
