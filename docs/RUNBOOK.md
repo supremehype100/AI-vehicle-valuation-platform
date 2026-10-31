@@ -31,7 +31,15 @@ docker compose exec ollama ollama pull qwen3-vl:4b-thinking
 (Running Ollama directly on the host instead of in Docker also works — just make sure `OLLAMA_HOST` in `.env`
 points at it, and run the same `ollama pull qwen3-vl:4b-thinking`.)
 
-## 3. Apply database migrations
+## 3. Create the tables and apply database migrations
+
+On a brand-new database, one command does both:
+
+```bash
+python run.py init_db          # create tables, then apply every pending migration
+```
+
+To inspect or apply migrations on their own (for example after pulling new code):
 
 ```bash
 python migrations/migrate.py --status      # see what's pending

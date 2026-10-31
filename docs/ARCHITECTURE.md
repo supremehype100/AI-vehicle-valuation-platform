@@ -1,5 +1,13 @@
 # Architecture
 
+This page records the data flow and *why* the system is shaped the way it is.
+For a friendlier introduction see [OVERVIEW.md](OVERVIEW.md); for what each
+module does see [MODULES.md](MODULES.md).
+
+Note: the condition fields extracted by the AI step are stored on each listing
+but are not yet consumed by the feature-engineering step (the arrow below shows
+where they would plug in).
+
 ## Data flow
 
 ```
@@ -22,7 +30,7 @@ Private table   Dealer table   Salvage table      (logical split via
                    v
        Condition extraction (condition/ + backfill/)
          - Text:   Listing.description
-         - Images: Listing.image_urls -> Ollama/Qwen2.5-VL
+         - Images: Listing.image_urls -> Ollama / Qwen vision-language model
          - Output: condition_assessments (audit trail, insert-only)
                    -> merged into Listing.condition_* (precedence-ruled)
                    |
@@ -47,7 +55,7 @@ Private table   Dealer table   Salvage table      (logical split via
 
 ## Why a single Postgres table with a `listing_type` discriminator, not three databases
 
-The task calls for three separate datasets (private/dealer/salvage) that must never contaminate each other. Three fully
+The design calls for three separate datasets (private/dealer/salvage) that must never contaminate each other. Three fully
 separate Postgres databases (or schemas) would mean triplicating `listings`, `listing_snapshots`, `price_predictions`,
 and `condition_assessments`, plus every foreign key and every query in `Ingest.py`/`Features.py`. Given the existing
 architecture is one Postgres database with one `listings` table, the lower-risk, equally-safe design is:
