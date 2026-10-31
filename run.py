@@ -12,6 +12,7 @@ Commands:
     python run.py value                — interactive valuation prompt
     python run.py pipeline [pages]     — scrape + train in one shot
     python run.py status               — show DB stats
+    python run.py init_db              — create tables and apply SQL migrations (run once)
     (see COMMANDS below for the backfill, training and comparison commands)
 """
 
@@ -194,6 +195,18 @@ def cmd_value():
             print(f"             {c['url']}")
     else:
         print("\nNo comparable listings in DB yet. Scrape more data.")
+
+
+def cmd_init_db():
+    """Prepare an empty database: create the ORM tables, then apply the numbered
+    SQL migrations (extra constraints, indexes and the dataset views). Safe to
+    re-run."""
+    from Session import create_tables
+    from migrations.migrate import run as run_migrations
+
+    create_tables()
+    run_migrations()
+    print("Database ready.")
 
 
 def cmd_status():
@@ -440,6 +453,7 @@ COMMANDS = {
     "value":       cmd_value,
     "pipeline":    cmd_pipeline,
     "status":      cmd_status,
+    "init_db":     cmd_init_db,
     "scrape_fast": cmd_scrape_fast,
     "scrape_facebook": cmd_scrape_facebook,
     "scrape_statvin": cmd_scrape_statvin,
