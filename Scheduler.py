@@ -117,7 +117,7 @@ def maintenance_worker():
         try:
             # --- 6:00 AM: scrape everything, then backfill conditions ---
             if now.hour == 6 and now.minute == 0 and not bulk_run_today:
-                logger.info("Running global bulk scrape (including Facebook)...")
+                logger.info("Running global bulk scrape...")
                 subprocess.run([PYTHON, RUN_SCRIPT, "bulk"])
 
                 logger.info("Running sold detection sweep...")
