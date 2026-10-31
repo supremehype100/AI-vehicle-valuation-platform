@@ -54,3 +54,8 @@ def test_facebook_drops_invalid_price_and_parts_cars():
 
 def test_facebook_not_listed_mileage_is_none():
     assert Facebook.normalize_visible(_fb_page(mileage="Not Listed"), "3")["mileage"] is None
+
+
+def test_init_db_command_is_registered():
+    import run
+    assert run.COMMANDS["init_db"] is run.cmd_init_db
