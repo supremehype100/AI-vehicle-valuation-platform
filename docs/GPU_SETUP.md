@@ -1,7 +1,7 @@
-# GPU Setup for the Ollama / Qwen2.5-VL Condition Pipeline
+# GPU Setup for the Ollama / Qwen-VL Condition Pipeline
 
 The `condition/` package calls a local Ollama server (the `ollama` service in
-`docker-compose.yml`) running `qwen2.5vl:7b` to extract vehicle condition from
+`docker-compose.yml`) running the model named by `QWEN_MODEL` (default `qwen3-vl:4b-thinking`) to extract vehicle condition from
 listing photos + text. This document covers getting that service running on
 an NVIDIA GPU, and what to expect if it isn't.
 
@@ -72,7 +72,7 @@ below) while you sort that out.
 ```bash
 cp .env.example .env
 docker compose up -d db ollama
-docker compose exec ollama ollama pull qwen2.5vl:7b
+docker compose exec ollama ollama pull qwen3-vl:4b-thinking
 ```
 
 The pull is a one-time, several-GB download (the model tag itself is ~5-6GB
@@ -82,7 +82,7 @@ on disk at Ollama's default Q4_K_M quantization); it's cached in the
 
 ## 4. VRAM footprint and why an 11GB card is enough
 
-`qwen2.5vl:7b` at Ollama's default quantization (Q4_K_M) is approximately:
+The sizing below is for `qwen2.5vl:7b` (a larger alternative you can select via `QWEN_MODEL`) at Ollama's default quantization (Q4_K_M); the default 4B model needs less:
 
 - **~6GB on disk**
 - **~7-8GB resident in VRAM including KV cache** during inference, for the
