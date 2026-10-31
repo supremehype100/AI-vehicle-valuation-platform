@@ -119,7 +119,7 @@ image_urls (list), raw_json (dict, extras for ML), posted_at
 
 ### Facebook Marketplace scraper
 - **File:** `Facebook.py`. **Method:** a real Chromium window driven by Playwright with a **persistent, already-logged-in profile** (`./fb_chrome_profile_fresh`). It collects item links from a feed page, opens each, reads the visible text and passes it through `normalize_visible()`.
-- **Why a browser:** Marketplace needs a logged-in session and renders in JavaScript. It runs headed (a window opens), so it is **not a good fit for Docker** and not for servers without a display.
+- **Why a browser:** Marketplace needs a logged-in session and renders in JavaScript. It runs headed (a window opens), so it is **not a good fit for Docker** and not for headless servers.
 - **Setup and risks:** [ADVANCED_SETUP.md](ADVANCED_SETUP.md#facebook-marketplace-setup). Automated access may breach Facebook's terms; use your own account and low volume.
 - **Feeds:** `run.FB_TARGET_URLS` lists the search pages to visit; `cmd_scrape_facebook` processes them one at a time.
 - **Timing:** governed by the `FB_*` settings.

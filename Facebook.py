@@ -305,7 +305,7 @@ async def _run_and_collect(max_listings: int, target_url: str) -> list[dict]:
             user_data_dir=str(Path(CHROME_USER_DATA).resolve()),
             headless=False,
             ignore_default_args=["--enable-automation"],
-            # ⬇️ TWEAKED ARGS: Added focus prevention flags ⬇️
+            # TWEAKED ARGS: Added focus prevention flags
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-startup-window",  # Spawns window in the background

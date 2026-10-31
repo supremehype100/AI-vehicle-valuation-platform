@@ -190,11 +190,11 @@ The connection pool is 5 + 10 overflow (`Session.py`). Several simultaneous jobs
 
 ## AI model and GPU choices
 
-| Situation | Suggestion |
-| --- | --- |
-| NVIDIA GPU with 8-12 GB | Default `qwen3-vl:4b-thinking`, or try `qwen2.5vl:7b` (about 7-8 GB resident) |
-| 24 GB+ GPU | Larger Qwen-VL variants may work; raise `OLLAMA_NUM_CTX` carefully |
-| No GPU | CPU-only Compose override; raise `OLLAMA_REQUEST_TIMEOUT_SECONDS` to 300+; lower `MAX_IMAGES_PER_LISTING` and `IMAGE_MAX_DIMENSION_PX` |
+| Situation | Suggestion                                                                                                |
+| --- |-----------------------------------------------------------------------------------------------------------|
+| NVIDIA GPU with 8-12 GB | Default `qwen3-vl:4b-thinking`, or try `qwen2.5vl:7b` (about 7-8 GB resident)                             |
+| 24 GB+ GPU | Larger Qwen-VL variants may work; raise `OLLAMA_NUM_CTX` carefully                                        |
+| No GPU | Dont bother                                                                                               |
 | Don't want AI at all | Never run `backfill_conditions` and remove it from `Scheduler.maintenance_worker`. Everything else works. |
 
 To swap the model:
@@ -257,14 +257,14 @@ listings, and keep `listings` itself because training needs it.
 
 ## Tuning and capacity
 
-| Goal | Knob |
-| --- | --- |
-| Faster scraping | Lower the `random.uniform` sleeps in the scrapers (increases the chance of being blocked) |
-| Gentler scraping | Raise them, or slow the scheduler's 60 s cadence |
-| Faster AI backfill | Smaller `IMAGE_MAX_DIMENSION_PX`, fewer `MAX_IMAGES_PER_LISTING`, GPU instead of CPU |
-| Smaller GPU memory | Smaller `OLLAMA_NUM_CTX`, smaller model |
-| Faster training | `n_jobs=-1` already uses all cores; fewer trees (`n_estimators`) in `Model.train` / `XGB_PARAMS` |
-| Better accuracy | More data first; then hyper-parameters |
+| Goal | Knob                                                                                                  |
+| --- |-------------------------------------------------------------------------------------------------------|
+| Faster scraping | Lower the `random.uniform` sleeps in the scrapers (BE CAREFUL, increases the chance of being blocked) |
+| Gentler scraping | Raise them, or slow the scheduler's 60 s cadence                                                      |
+| Faster AI backfill | Smaller `IMAGE_MAX_DIMENSION_PX`, fewer `MAX_IMAGES_PER_LISTING`, GPU instead of CPU                  |
+| Smaller GPU memory | Smaller `OLLAMA_NUM_CTX`, smaller model                                                               |
+| Faster training | `n_jobs=-1` already uses all cores; fewer trees (`n_estimators`) in `Model.train` / `XGB_PARAMS`      |
+| Better accuracy | More data first; then hyper-parameters                                                                |
 
 ---
 
