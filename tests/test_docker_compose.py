@@ -92,3 +92,8 @@ def test_env_example_documents_every_config_var():
         assert name in env_example, f"{name} missing from .env.example"
         checked += 1
     assert checked == 6
+
+
+def test_app_build_context_is_the_project_root():
+    compose = yaml.safe_load(open("docker-compose.yml", encoding="utf-8"))
+    assert compose["services"]["app"]["build"]["context"] == "."

@@ -137,7 +137,7 @@ services:
 
   app:
     build:
-      context: New folder
+      context: .
       dockerfile: Dockerfile
     # No restart policy — this is a job-runner image, not a long-lived
     # service. The default command below is an idle no-op; real work happens
